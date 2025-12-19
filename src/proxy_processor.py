@@ -11,9 +11,10 @@ import concurrent.futures
 import subprocess
 import sys
 import shutil
+import platform
 from datetime import datetime, timezone
 
-# --- Try importing geoip2 (Handle missing library gracefully) ---
+# --- Try importing geoip2 ---
 try:
     import geoip2.database
     HAS_GEOIP_LIB = True
@@ -39,16 +40,34 @@ def stop_processing():
             print("Killed speedtest process.")
         except: pass
 
-# --- Configuration (FLET BUILD COMPATIBLE) ---
+# --- Configuration (MERGED FIX) ---
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR = os.getcwd()
 
-# READ-ONLY PATHS
-ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
+def get_work_dir():
+    if platform.system() != "Windows":
+        return os.path.expanduser("~")
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.getcwd()
+
+WORK_DIR = get_work_dir()
+
+# 1. Assets Logic (Priority: User File > Bundled File)
+USER_CHANNELS_DIR = os.path.join(WORK_DIR, "channelsData")
+USER_ASSETS_FILE = os.path.join(USER_CHANNELS_DIR, "channelsAssets.json")
+BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
+
+# Logic: If user has their own file, use it. Otherwise read the internal one.
+if os.path.exists(USER_ASSETS_FILE):
+    ASSETS_FILE = USER_ASSETS_FILE
+else:
+    ASSETS_FILE = BUNDLED_ASSETS_FILE
+
+# 2. Other Read-Only Assets
 TEMPLATES_DIR = os.path.join(INTERNAL_DIR, "templates")
 MMDB_FILE = os.path.join(INTERNAL_DIR, "channelsData", "GeoLite2-Country.mmdb")
 
-# WRITEABLE PATHS
+# 3. Writeable Paths (Persistent)
 OUTPUT_DIR = os.path.join(WORK_DIR, "subscriptions")
 LOCATION_DIR = os.path.join(OUTPUT_DIR, "location")
 CHANNEL_SUBS_DIR = os.path.join(OUTPUT_DIR, "channel")

@@ -11,26 +11,42 @@ import stat
 import requests
 import proxy_processor  # Your backend file
 
-# --- Configuration (FLET BUILD COMPATIBLE) ---
+# --- Configuration (MERGED FIX: Persistence + User Data) ---
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR = os.getcwd()
 
-# Paths for User Data (Writable)
+def get_work_dir():
+    # 1. Android / Linux / MacOS (Persistent User Data)
+    if platform.system() != "Windows":
+        return os.path.expanduser("~")
+    
+    # 2. Windows EXE (Portable - Next to EXE)
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    
+    # 3. Windows Script (Current Folder)
+    return os.getcwd()
+
+# Set Global Working Directory
+WORK_DIR = get_work_dir()
+
+# --- PATH DEFINITIONS ---
+
+# 1. Channels Logic (User Editable vs Bundled)
 USER_CHANNELS_DIR = os.path.join(WORK_DIR, "channelsData")
 USER_ASSETS_FILE = os.path.join(USER_CHANNELS_DIR, "channelsAssets.json")
-
-# Paths for Bundled Data (Read-Only)
 BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 
+# 2. General Settings & Output
 SETTINGS_FILE = os.path.join(WORK_DIR, "settings.json")
 SUMMARY_FILE = os.path.join(WORK_DIR, "subscriptions", "summary.json")
 CONFIG_FILE = os.path.join(WORK_DIR, "config.txt")
 
-# Xray Knife
+# 3. Xray Knife
 IS_WINDOWS = sys.platform == "win32"
 XRAY_KNIFE_EXE = "xray-knife.exe" if IS_WINDOWS else "xray-knife"
 XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 
+# GitHub Repo Info
 REPO_OWNER = "lilendian0x00"
 REPO_NAME = "xray-knife"
 
@@ -108,14 +124,14 @@ class Logger:
         except: pass
 
 def main(page: ft.Page):
-    # 1. Initialize Settings (Copy out if missing)
+    # 1. Initialize Settings
     default_settings_src = os.path.join(INTERNAL_DIR, "settings.json")
     if not os.path.exists(SETTINGS_FILE) and os.path.exists(default_settings_src):
         try: shutil.copy(default_settings_src, SETTINGS_FILE)
         except: pass
 
-    # 2. Initialize Channels (Copy out if missing)
-    # This makes the channels editable by the user
+    # 2. Initialize Channels (Extract bundled file to user folder)
+    # This enables the "User Editable" feature
     if not os.path.exists(USER_ASSETS_FILE):
         try:
             if not os.path.exists(USER_CHANNELS_DIR):
