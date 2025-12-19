@@ -108,7 +108,7 @@ jobs:
       # FIX: Add '|| true' to prevent 'Broken Pipe' from failing the build
       - name: Accept Android Licenses
         run: |
-          yes | flutter doctor --android-licenses || true
+          yes "y" | head -n 100 | flutter doctor --android-licenses
 
       - name: Build APK
         run: flet build apk --verbose
