@@ -3,7 +3,7 @@ name = "psg_station"
 version = "1.0.2"
 description = "Advanced Proxy Grabber & Speedtester"
 authors = [
-    { name = "Your Name", email = "you@example.com" }
+    { name = "yebekhe", email = "yebekhe@proton.me" }
 ]
 dependencies = [
     "flet",
@@ -12,7 +12,7 @@ dependencies = [
 requires-python = ">=3.9"
 
 [tool.flet]
-org = "com.psgstation"
+org = "com.yebekhe"
 product = "PSG Station"
 company = "PSG Devs"
 copyright = "Copyright (C) 2025 PSG"
@@ -27,4 +27,5 @@ icon = "assets/icon.png"
 [tool.flet.android.signing]
 key_store = "upload-keystore.jks"
 key_alias = "upload"
+
 
