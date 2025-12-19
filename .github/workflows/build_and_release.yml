@@ -16,12 +16,14 @@ permissions:
 
 jobs:
   # ------------------------------------
-  # 1. BUILD WINDOWS (CORRECTED)
+  # 1. BUILD WINDOWS
   # ------------------------------------
   build-windows:
     runs-on: windows-latest
     env:
+      # CRITICAL: Forces Python to use UTF-8 for IO to prevent 'charmap' errors with Flet's progress bar
       PYTHONIOENCODING: utf-8
+      PYTHONUTF8: 1
       PYTHONLEGACYWINDOWSSTDIO: utf-8
     steps:
       - name: Checkout code
@@ -34,7 +36,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install flet requests 
+          pip install flet requests geoip2
           pip install -r requirements.txt
 
       - name: Setup Flutter
@@ -43,21 +45,23 @@ jobs:
           channel: stable
 
       - name: Build Windows EXE
-        run: flet build windows --verbose
+        shell: pwsh
+        run: |
+          # Double check: Force console to UTF-8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          flet build windows --verbose
 
       - name: Prepare Release Folder
         shell: pwsh
         run: |
-          # Flet moves the final EXE and DLLs here
           $buildDir = "build\windows"
           
-          # 1. Copy external assets next to the EXE
+          # Copy external assets next to the EXE
           Copy-Item -Path "src\channelsData" -Destination $buildDir -Recurse
           Copy-Item -Path "src\templates" -Destination $buildDir -Recurse
           Copy-Item -Path "src\settings.json" -Destination $buildDir
 
-          # 2. List files for debugging (visible in GitHub Action logs)
-          Write-Host "Contents of build output:"
+          Write-Host "Verifying Build Content:"
           Get-ChildItem -Path $buildDir
 
       - name: Zip Windows Build
@@ -65,7 +69,7 @@ jobs:
         with:
           type: 'zip'
           filename: 'PSG_Station_Windows.zip'
-          directory: 'build/windows'  # <--- The correct folder
+          directory: 'build/windows'
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -101,10 +105,10 @@ jobs:
         with:
           channel: stable
 
-      # Fix for License Error
+      # FIX: Add '|| true' to prevent 'Broken Pipe' from failing the build
       - name: Accept Android Licenses
         run: |
-          Y | flutter doctor --android-licenses
+          yes | flutter doctor --android-licenses || true
 
       - name: Build APK
         run: flet build apk --verbose
@@ -121,13 +125,11 @@ jobs:
   create-release:
     needs: [build-windows, build-android]
     runs-on: ubuntu-latest
-    # Run if it's a Tag push OR a Manual Dispatch
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Logic to determine which version string to use
       - name: Determine Tag Name
         id: tag_info
         shell: bash
