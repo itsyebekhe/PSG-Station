@@ -194,10 +194,41 @@ def main(page: ft.Page):
     # ==========================
 
     def update_stats():
-        d = load_json(SUMMARY_FILE)
-        st_raw.value = str(d.get('configs', {}).get('total_raw', "-"))
-        st_loc.value = str(len(d.get('outputs', {}).get('country_distribution', {})))
-        st_src.value = str(d.get('sources', {}).get('valid', "-"))
+        try:
+            # 1. Paths
+            mix_file = os.path.join(WORK_DIR, "subscriptions", "xray", "normal", "mix")
+            
+            # 2. Manual Count of the Mix file
+            actual_count = 0
+            if os.path.exists(mix_file):
+                with open(mix_file, 'r', encoding='utf-8') as f:
+                    # Only count lines that actually contain a config (vless, vmess, etc)
+                    actual_count = sum(1 for line in f if ":" in line)
+
+            # 3. Load JSON and OVERWRITE the wrong data
+            d = load_json(SUMMARY_FILE)
+            
+            # Force update the structure
+            if "configs" not in d: d["configs"] = {}
+            if "sources" not in d: d["sources"] = {"valid": 0}
+            if "outputs" not in d: d["outputs"] = {"country_distribution": {}}
+            
+            d["configs"]["total_raw"] = actual_count
+            
+            # 4. Save the corrected JSON back to disk
+            save_json(SUMMARY_FILE, d)
+
+            # 5. Update UI
+            st_raw.value = str(actual_count)
+            st_src.value = str(d["sources"].get("valid", "0"))
+            
+            # Update Country Count (if stage 2 ran)
+            countries = d["outputs"].get("country_distribution", {})
+            st_loc.value = str(len(countries)) if countries else "0"
+            
+        except Exception as e:
+            logger.write(f"Stats Error: {e}")
+        
         page.update()
 
     def finish_ui(success=True):
@@ -208,7 +239,9 @@ def main(page: ft.Page):
         btn_action.icon = ft.Icons.PLAY_ARROW_ROUNDED
         btn_action.style.bgcolor = COLOR_PRIMARY
         btn_action.disabled = False
-        if success: update_stats()
+        
+        # This will now count the file and fix the JSON
+        update_stats()
         page.update()
 
     def process_thread():
@@ -565,6 +598,7 @@ def main(page: ft.Page):
     def nav_change(e):
         idx = e.control.selected_index
         if idx == 0: 
+            update_stats()
             content_area.content = view_dashboard # REMOVED ()
         elif idx == 1: 
             refresh_chan()
