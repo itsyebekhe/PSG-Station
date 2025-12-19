@@ -3,8 +3,8 @@ name: Build and Release
 on:
   push:
     tags:
-      - "v*" # Triggers only when you push a tag like v1.0.0
-  workflow_dispatch: # Allows manual triggering
+      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,6 +15,9 @@ jobs:
   # ------------------------------------
   build-windows:
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8  # <--- FIX FOR CHARMAP ERROR
+      PYTHONLEGACYWINDOWSSTDIO: utf-8
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,12 +40,10 @@ jobs:
       - name: Build Windows EXE
         run: flet build windows --verbose
 
-      # CRITICAL: Copy external assets next to the EXE before zipping
       - name: Prepare Release Folder
         shell: pwsh
         run: |
           $buildDir = "build\windows\runner\Release"
-          # Copy folders from src to build output
           Copy-Item -Path "src\channelsData" -Destination $buildDir -Recurse
           Copy-Item -Path "src\templates" -Destination $buildDir -Recurse
           Copy-Item -Path "src\settings.json" -Destination $buildDir
@@ -81,7 +82,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install flet requests geoip2
+        # Removed geoip2 here too
+        run: pip install flet requests
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -98,47 +100,10 @@ jobs:
           path: build/apk/app-release.apk
 
   # ------------------------------------
-  # 3. BUILD MACOS
-  # ------------------------------------
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Dependencies
-        run: pip install flet requests geoip2
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
-      - name: Build macOS App
-        run: flet build macos --verbose
-
-      # macOS apps are folders (.app). We must zip them.
-      - name: Zip macOS App
-        run: |
-          cd build/macos/Build/Products/Release
-          zip -r PSG_Station_macOS.zip psg_station.app
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: build/macos/Build/Products/Release/PSG_Station_macOS.zip
-
-  # ------------------------------------
-  # 4. CREATE GITHUB RELEASE
+  # 3. CREATE RELEASE
   # ------------------------------------
   create-release:
-    needs: [build-windows, build-android, build-macos]
+    needs: [build-windows, build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -152,11 +117,6 @@ jobs:
         with:
           name: android-build
 
-      - name: Download macOS Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-build
-
       - name: Rename APK
         run: mv app-release.apk PSG_Station_Android.apk
 
@@ -166,6 +126,5 @@ jobs:
           files: |
             PSG_Station_Windows.zip
             PSG_Station_Android.apk
-            PSG_Station_macOS.zip
           draft: false
           prerelease: false
