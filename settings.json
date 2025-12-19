@@ -1,0 +1,7 @@
+{
+    "branding_name": "PSG",
+    "max_per_channel": 40,
+    "timeout": 10,
+    "enable_converters": false,
+    "fake_configs": "#\u0647\u0645\u06a9\u0627\u0631\u06cc_\u0645\u0644\u06cc,#\u062c\u0627\u0648\u06cc\u062f\u0634\u0627\u0647,#KingRezaPahlavi"
+}

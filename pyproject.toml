@@ -1,0 +1,25 @@
+[project]
+name = "psg_station"
+version = "1.0.0"
+description = "Advanced Proxy Grabber & Speedtester"
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+dependencies = [
+    "flet",
+    "requests",
+    "geoip2"
+]
+requires-python = ">=3.9"
+
+[tool.flet]
+org = "com.psgstation"
+product = "PSG Station"
+company = "PSG Devs"
+copyright = "Copyright (C) 2025 PSG"
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.windows]
+icon = "assets/icon.png"
