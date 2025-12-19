@@ -23,3 +23,7 @@ path = "src"
 [tool.flet.windows]
 
 icon = "assets/icon.png"
+
+[tool.flet.android.signing]
+key_store = "upload-keystore.jks"
+key_alias = "upload"
