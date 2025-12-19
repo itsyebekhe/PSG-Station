@@ -17,24 +17,43 @@ import proxy_processor
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    if "ANDROID_ARGUMENT" in os.environ:
-        base = os.environ.get("HOME", "/data/data/com.psgstation/files")
-        path = os.path.join(base, "psg_data")
-        if not os.path.exists(path): 
-            try: os.makedirs(path)
-            except: pass
+    # 1. Android Detection
+    if "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel') or os.path.exists("/system/build.prop"):
+        # Get the internal storage path from the environment
+        path = os.environ.get("HOME")
+        
+        # If HOME is missing or points to root, use your specific package path
+        if not path or path == "/":
+             path = "/data/data/com.yebekhe.psg_station/files"
+        
+        # Ensure the directory exists
+        if not os.path.exists(path):
+            try: 
+                os.makedirs(path, exist_ok=True)
+            except Exception as e: 
+                # If we can't create it, we are likely in a restricted environment. 
+                # Print error but return path anyway.
+                print(f"Error creating path: {e}")
+                pass
+            
         return path
+    
+    # 2. PC (Frozen/Compiled)
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
+    
+    # 3. PC (Script)
     return os.getcwd()
 
 WORK_DIR = get_work_dir()
+
+# Force correct binary filename
+XRAY_KNIFE_EXE = "xray-knife.exe" if sys.platform == "win32" else "xray-knife"
+XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 USER_ASSETS_FILE = os.path.join(WORK_DIR, "channelsData", "channelsAssets.json")
 BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 SETTINGS_FILE = os.path.join(WORK_DIR, "settings.json")
 SUMMARY_FILE = os.path.join(WORK_DIR, "subscriptions", "summary.json")
-XRAY_KNIFE_EXE = "xray-knife.exe" if sys.platform == "win32" else "xray-knife"
-XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 
 # --- THEME COLORS ---
 COLOR_BG_TOP = "#050505"
@@ -229,45 +248,115 @@ def main(page: ft.Page):
     # --- Helper to download the tool ---
     def download_tool(on_done=None):
         try:
-            target, err = proxy_processor.get_target_asset_name() # Ensure this exists in your backend
-            if err: return logger.write(f"Error: {err}")
+            logger.write(f"📂 Work Dir: {WORK_DIR}")
             
-            logger.write(f"Downloading {target}...")
-            url = f"https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest"
-            assets = requests.get(url).json().get("assets", [])
-            dl_url = next((x["browser_download_url"] for x in assets if x["name"] == target), None)
+            # --- 1. DETERMINE TARGET FILE ---
+            target_asset = ""
+            is_android = "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel') or os.path.exists("/system/build.prop")
             
-            if not dl_url: return logger.write("Asset not found.")
+            if is_android:
+                # Force the specific file you mentioned
+                target_asset = "Xray-knife-android-arm64-v8a.zip"
+            else:
+                # Keep PC logic for Windows/Linux
+                target_asset, err = proxy_processor.get_target_asset_name()
+                if err: 
+                    logger.write(f"Error: {err}")
+                    finish_ui(False)
+                    return
+
+            logger.write(f"⬇️ Downloading: {target_asset}")
+            
+            # --- 2. DOWNLOAD FROM GITHUB ---
+            headers = {"User-Agent": "Mozilla/5.0"} # Required to avoid 403 Forbidden
+            url = "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest"
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logger.write(f"❌ GitHub API Error: {resp.status_code}")
+                finish_ui(False)
+                return
+
+            assets = resp.json().get("assets", [])
+            dl_url = next((x["browser_download_url"] for x in assets if x["name"] == target_asset), None)
+            
+            if not dl_url:
+                logger.write(f"❌ File not found in release: {target_asset}")
+                finish_ui(False)
+                return
             
             zip_path = os.path.join(WORK_DIR, "tool.zip")
-            with requests.get(dl_url, stream=True) as r:
+            with requests.get(dl_url, stream=True, headers=headers) as r:
+                r.raise_for_status()
                 with open(zip_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
             
-            with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
+            # --- 3. EXTRACT AND FIX PERMISSIONS ---
+            logger.write("📦 Extracting...")
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
+            except zipfile.BadZipFile:
+                logger.write("❌ Error: Downloaded file is corrupt.")
+                finish_ui(False)
+                return
+
+            os.remove(zip_path) # Clean up
+
+            # Find the binary (it might be in a subfolder or named differently)
+            binary_found = False
+            for root, dirs, files in os.walk(WORK_DIR):
+                for file in files:
+                    # On Android/Linux it's just 'xray-knife', on Win it's 'xray-knife.exe'
+                    if file == "xray-knife" or file == "xray-knife.exe":
+                        full_path = os.path.join(root, file)
+                        # Move it to the main path if it isn't there already
+                        if full_path != XRAY_KNIFE_PATH:
+                            if os.path.exists(XRAY_KNIFE_PATH): os.remove(XRAY_KNIFE_PATH)
+                            shutil.move(full_path, XRAY_KNIFE_PATH)
+                        binary_found = True
+                        break
+                if binary_found: break
             
+            if not binary_found:
+                logger.write("❌ Binary not found inside Zip.")
+                finish_ui(False)
+                return
+
+            # CRITICAL: Make it executable
             if sys.platform != "win32":
+                logger.write("🔑 Setting executable permissions...")
                 os.chmod(XRAY_KNIFE_PATH, 0o777)
-            os.remove(zip_path)
+
             logger.write("✅ Tool Ready.")
             if on_done: on_done()
+
         except Exception as e:
-            logger.write(f"Download Error: {e}")
+            logger.write(f"❌ Crash: {e}")
+            finish_ui(False)
 
     # --- Updated Action Click with Tool Check ---
     def on_action_click(e):
-        if btn_action.text == "START":
-            # CHECK IF TOOL EXISTS
+        # Allow click if text is START OR if it's currently downloading
+        if btn_action.text in ["START", "Downloading..."]:
+            
+            # 1. Check if tool exists
             if not os.path.exists(XRAY_KNIFE_PATH):
                 def start_dl(e):
                     page.close(dlg_missing)
                     btn_action.disabled = True
-                    btn_action.text = "Downloading..."
+                    btn_action.text = "Downloading..." # Set state
                     page.update()
-                    threading.Thread(target=download_tool, args=(lambda: on_action_click(None),), daemon=True).start()
+                    
+                    # Callback to restart this function after download
+                    def after_dl():
+                        btn_action.text = "START" 
+                        btn_action.disabled = False
+                        on_action_click(None) # Auto-click start
+
+                    threading.Thread(target=download_tool, args=(after_dl,), daemon=True).start()
 
                 dlg_missing = ft.AlertDialog(
                     title=ft.Text("Tool Missing"),
-                    content=ft.Text("Xray-Knife is required for speedtesting. Download now?"),
+                    content=ft.Text("Downloading Xray-Knife? This may take a while."),
                     actions=[
                         ft.TextButton("Cancel", on_click=lambda e: page.close(dlg_missing)),
                         ft.ElevatedButton("Download", on_click=start_dl)
@@ -276,10 +365,11 @@ def main(page: ft.Page):
                 page.open(dlg_missing)
                 return
 
-            # Proceed to Start if tool exists
+            # 2. Start Processing
             btn_action.text = "STOP"
             btn_action.icon = ft.Icons.STOP_ROUNDED
             btn_action.style.bgcolor = COLOR_ERROR
+            btn_action.disabled = False
             status_text.value = "Working..."
             status_ring.value = None
             page.update()
@@ -290,7 +380,7 @@ def main(page: ft.Page):
             proxy_processor.init_globals({**DEFAULT_SETTINGS, **settings})
             threading.Thread(target=process_thread, daemon=True).start()
         else:
-            # STOP logic
+            # 3. Stop Processing
             btn_action.disabled = True
             btn_action.text = "STOPPING..."
             page.update()
