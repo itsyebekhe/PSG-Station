@@ -635,8 +635,18 @@ def run_stage_1(): Stage1_Fetcher().run()
 def run_stage_2_5(cb=None, convert=True):
     Stage2_Extractor().run(progress_callback=cb)
     Stage3_Deduplicator().run()
-    valid = Stage3_5_Speedtest().run(progress_callback=cb)
-    Stage4_Sorter().run(config_list=valid)
+    
+    # 3.5: Returns the filtered list (or None if failed)
+    valid_list = Stage3_5_Speedtest().run(progress_callback=cb)
+    
+    # 4: Sorts ONLY the filtered list (or falls back if none)
+    Stage4_Sorter().run(config_list=valid_list)
+    
+    # 5: Convert (Singbox/Clash)
+    if convert:
+        Stage5_Converters().run(progress_callback=cb)
+    else:
+        print("Skipping Converters.")
 
 if __name__ == "__main__":
     init_globals({})
