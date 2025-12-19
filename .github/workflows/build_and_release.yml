@@ -1,0 +1,171 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*" # Triggers only when you push a tag like v1.0.0
+  workflow_dispatch: # Allows manual triggering
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------
+  # 1. BUILD WINDOWS
+  # ------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          pip install flet requests geoip2
+          pip install -r requirements.txt
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build Windows EXE
+        run: flet build windows --verbose
+
+      # CRITICAL: Copy external assets next to the EXE before zipping
+      - name: Prepare Release Folder
+        shell: pwsh
+        run: |
+          $buildDir = "build\windows\runner\Release"
+          # Copy folders from src to build output
+          Copy-Item -Path "src\channelsData" -Destination $buildDir -Recurse
+          Copy-Item -Path "src\templates" -Destination $buildDir -Recurse
+          Copy-Item -Path "src\settings.json" -Destination $buildDir
+
+      - name: Zip Windows Build
+        uses: thedoctor0/zip-release@0.7.6
+        with:
+          type: 'zip'
+          filename: 'PSG_Station_Windows.zip'
+          directory: 'build/windows/runner/Release'
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: build/windows/runner/Release/PSG_Station_Windows.zip
+
+  # ------------------------------------
+  # 2. BUILD ANDROID (APK)
+  # ------------------------------------
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: pip install flet requests geoip2
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build APK
+        run: flet build apk --verbose
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: build/apk/app-release.apk
+
+  # ------------------------------------
+  # 3. BUILD MACOS
+  # ------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: pip install flet requests geoip2
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build macOS App
+        run: flet build macos --verbose
+
+      # macOS apps are folders (.app). We must zip them.
+      - name: Zip macOS App
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r PSG_Station_macOS.zip psg_station.app
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: build/macos/Build/Products/Release/PSG_Station_macOS.zip
+
+  # ------------------------------------
+  # 4. CREATE GITHUB RELEASE
+  # ------------------------------------
+  create-release:
+    needs: [build-windows, build-android, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+
+      - name: Download Android Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+
+      - name: Rename APK
+        run: mv app-release.apk PSG_Station_Android.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            PSG_Station_Windows.zip
+            PSG_Station_Android.apk
+            PSG_Station_macOS.zip
+          draft: false
+          prerelease: false
