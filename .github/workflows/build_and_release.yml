@@ -171,6 +171,3 @@ jobs:
             apk_folder/*.apk
           draft: false
           prerelease: false
-            PSG_Station_Android.apk
-          draft: false
-          prerelease: false
