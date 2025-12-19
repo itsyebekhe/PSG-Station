@@ -80,7 +80,7 @@ jobs:
           path: build/windows/PSG_Station_Windows.zip
 
   # ------------------------------------
-  # 2. BUILD ANDROID (SIGNED)
+  # 2. BUILD ANDROID (SIGNED & SPLIT)
   # ------------------------------------
   build-android:
     runs-on: ubuntu-latest
@@ -102,7 +102,6 @@ jobs:
       - name: Install Dependencies
         run: pip install flet requests
 
-      # Decode the keystore from GitHub Secrets
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > upload-keystore.jks
@@ -116,18 +115,19 @@ jobs:
         run: |
           yes "y" | head -n 100 | flutter doctor --android-licenses || true
 
-      - name: Build APK
+      # ADDED FLAG: --split-per-abi
+      - name: Build Split APKs
         env:
-          # Pass passwords securely to Flet
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flet build apk --verbose
+        run: flet build apk --split-per-abi --verbose
 
+      # Upload ALL generated APKs
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-build
-          path: build/apk/app-release.apk
+          path: build/apk/*.apk
 
   # ------------------------------------
   # 3. CREATE RELEASE
@@ -159,9 +159,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: android-build
-
-      - name: Rename APK
-        run: mv app-release.apk PSG_Station_Android.apk
+          path: apk_folder  # Download APKs into a subfolder to keep them organized
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -170,6 +168,9 @@ jobs:
           tag_name: ${{ steps.tag_info.outputs.TAG_NAME }}
           files: |
             PSG_Station_Windows.zip
+            apk_folder/*.apk
+          draft: false
+          prerelease: false
             PSG_Station_Android.apk
           draft: false
           prerelease: false
