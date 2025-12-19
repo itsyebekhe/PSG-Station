@@ -14,14 +14,12 @@ import shutil
 import platform
 from datetime import datetime, timezone
 
-# --- Try importing geoip2 ---
 try:
     import geoip2.database
     HAS_GEOIP_LIB = True
 except ImportError:
     HAS_GEOIP_LIB = False
 
-# --- Global Control Flags ---
 ABORT_FLAG = False
 CURRENT_SUBPROCESS = None
 
@@ -37,10 +35,9 @@ def stop_processing():
     if CURRENT_SUBPROCESS:
         try:
             CURRENT_SUBPROCESS.kill()
-            print("Killed speedtest process.")
         except: pass
 
-# --- Configuration (FLET BUILD COMPATIBLE) ---
+# --- Configuration ---
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
@@ -56,7 +53,6 @@ def get_work_dir():
 
 WORK_DIR = get_work_dir()
 
-# READ-ONLY PATHS
 ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 USER_CHANNELS = os.path.join(WORK_DIR, "channelsData", "channelsAssets.json")
 if os.path.exists(USER_CHANNELS):
@@ -65,7 +61,6 @@ if os.path.exists(USER_CHANNELS):
 TEMPLATES_DIR = os.path.join(INTERNAL_DIR, "templates")
 MMDB_FILE = os.path.join(INTERNAL_DIR, "channelsData", "GeoLite2-Country.mmdb")
 
-# WRITEABLE PATHS
 OUTPUT_DIR = os.path.join(WORK_DIR, "subscriptions")
 LOCATION_DIR = os.path.join(OUTPUT_DIR, "location")
 CHANNEL_SUBS_DIR = os.path.join(OUTPUT_DIR, "channel")
@@ -80,7 +75,6 @@ FINAL_CONFIG_FILE = os.path.join(WORK_DIR, "config.txt")
 API_DIR = os.path.join(WORK_DIR, "api")
 API_OUTPUT_FILE = os.path.join(API_DIR, "allConfigs.json")
 
-# --- Dynamic Configuration Class ---
 class GlobalConfig:
     BRANDING = "PSG"
     MAX_CONFIGS_PER_CHANNEL = 40
@@ -99,7 +93,7 @@ class GlobalConfig:
         else:
             cls.FAKE_CONFIGS = fakes
 
-# --- Helper Utilities ---
+# --- Utilities (Compact) ---
 class Utils:
     @staticmethod
     def safe_base64_decode(s: str) -> bytes:
@@ -107,20 +101,17 @@ class Utils:
         missing_padding = len(s) % 4
         if missing_padding: s += '=' * (4 - missing_padding)
         return base64.urlsafe_b64decode(s)
-
     @staticmethod
     def is_ip(s: str) -> bool:
         try:
             ipaddress.ip_address(s)
             return True
         except ValueError: return False
-
     @staticmethod
     def get_flag_emoji(country_code: str) -> str:
         country_code = country_code.upper()
         if len(country_code) != 2 or country_code == "XX": return '🏳️'
         return chr(ord(country_code[0]) + 127397) + chr(ord(country_code[1]) + 127397)
-
     @staticmethod
     def detect_type(config: str) -> str | None:
         if config.startswith('vmess://'): return 'vmess'
@@ -130,35 +121,29 @@ class Utils:
         if config.startswith('tuic://'): return 'tuic'
         if config.startswith('hy2://') or config.startswith('hysteria2://'): return 'hy2'
         return None
-
     @staticmethod
     def extract_links(text: str) -> list[str]:
         pattern = re.compile(r'(?:vmess|vless|trojan|ss|tuic|hy2|hysteria2)://[^\s"\']*(?=\s|<|>|$)', re.IGNORECASE)
         return pattern.findall(text)
-
     @staticmethod
     def is_valid_config(config: str) -> bool:
         return "..." not in config and "…" not in config
-
     @staticmethod
     def get_random_name(length=10) -> str:
         import random, string
         return ''.join(random.choices(string.ascii_lowercase, k=length))
-
     @staticmethod
     def is_base64(s: str) -> bool:
         try:
-            if not s: return False
             Utils.safe_base64_decode(s)
             return True
-        except Exception: return False
+        except: return False
 
 class ConfigParser:
     @staticmethod
     def parse(config: str) -> dict | None:
         ctype = Utils.detect_type(config)
         if not ctype: return None
-
         try:
             if ctype == 'vmess':
                 b64 = config[8:]
@@ -169,63 +154,40 @@ class ConfigParser:
                 parsed = urllib.parse.urlparse(config)
                 params = urllib.parse.parse_qs(parsed.query)
                 params = {k: v[0] for k, v in params.items()}
-                output = {
-                    'protocol': ctype,
-                    'username': parsed.username or '',
-                    'pass': parsed.password or '',
-                    'hostname': parsed.hostname or '',
-                    'port': parsed.port or '',
-                    'params': params,
+                return {
+                    'protocol': ctype, 'username': parsed.username or '', 'pass': parsed.password or '',
+                    'hostname': parsed.hostname or '', 'port': parsed.port or '', 'params': params,
                     'hash': urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"{GlobalConfig.BRANDING}_{Utils.get_random_name()}"
                 }
-                return output
             elif ctype == 'ss':
                 parsed = urllib.parse.urlparse(config)
                 user_info = urllib.parse.unquote(parsed.username or '')
                 if Utils.is_base64(user_info) and ':' not in user_info:
-                    try:
-                        decoded = Utils.safe_base64_decode(user_info).decode('utf-8')
-                        if ':' in decoded: user_info = decoded
+                    try: user_info = Utils.safe_base64_decode(user_info).decode('utf-8')
                     except: pass
                 if ':' not in user_info: return None
                 method, password = user_info.split(':', 1)
                 return {
-                    'protocol': 'ss', 
-                    'encryption_method': method,
-                    'password': password,
-                    'server_address': parsed.hostname or '',
-                    'server_port': parsed.port or '',
+                    'protocol': 'ss', 'encryption_method': method, 'password': password,
+                    'server_address': parsed.hostname or '', 'server_port': parsed.port or '',
                     'name': urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"{GlobalConfig.BRANDING}_{Utils.get_random_name()}"
                 }
-        except Exception: return None
+        except: return None
         return None
 
     @staticmethod
     def rebuild(data: dict, ctype: str) -> str | None:
         try:
             if ctype == 'vmess':
-                clean_data = data.copy()
-                clean_data.pop('protocol', None)
-                js = json.dumps(clean_data, separators=(',', ':'))
-                b64 = base64.urlsafe_b64encode(js.encode('utf-8')).decode('utf-8').rstrip('=')
-                return f"vmess://{b64}"
+                clean = data.copy(); clean.pop('protocol', None)
+                return f"vmess://{base64.urlsafe_b64encode(json.dumps(clean, separators=(',', ':')).encode('utf-8')).decode('utf-8').rstrip('=')}"
             elif ctype in ['vless', 'trojan', 'tuic', 'hy2']:
-                scheme = ctype
-                user = data.get('username', '')
-                password = data.get('pass', '')
-                auth = f"{user}:{password}@" if (password and ctype != 'vless') else (f"{user}@" if user else "")
-                authority = f"{auth}{data['hostname']}"
-                if data.get('port'): authority += f":{data['port']}"
-                query = urllib.parse.urlencode(data['params'])
-                frag = urllib.parse.quote(data['hash'])
-                return f"{scheme}://{authority}?{query}#{frag}"
+                auth = f"{data['username']}:{data['pass']}@" if (data['pass'] and ctype != 'vless') else (f"{data['username']}@" if data['username'] else "")
+                return f"{ctype}://{auth}{data['hostname']}{':' + str(data['port']) if data['port'] else ''}?{urllib.parse.urlencode(data['params'])}#{urllib.parse.quote(data['hash'])}"
             elif ctype == 'ss':
                 creds = f"{data['encryption_method']}:{data['password']}"
-                b64_creds = base64.urlsafe_b64encode(creds.encode('utf-8')).decode('utf-8').rstrip('=')
-                authority = f"{b64_creds}@{data['server_address']}:{data['server_port']}"
-                frag = urllib.parse.quote(data['name'])
-                return f"ss://{authority}#{frag}"
-        except Exception: return None
+                return f"ss://{base64.urlsafe_b64encode(creds.encode('utf-8')).decode('utf-8').rstrip('=')}@{data['server_address']}:{data['server_port']}#{urllib.parse.quote(data['name'])}"
+        except: return None
         return None
 
 # --- Proxy Converter ---
@@ -317,6 +279,7 @@ class ProxyConverter:
             return f"{data['name'].replace(',', ' ')} = ss, {data['server_address']}, {str(data['server_port'])}, encrypt-method={data['encryption_method']}, password={data['password']}"
         return None
 
+# --- GeoIP ---
 class GeoIP:
     def __init__(self):
         self.cache = {}
@@ -324,432 +287,260 @@ class GeoIP:
             try:
                 with open(IP_CACHE_FILE, 'r', encoding='utf-8') as f: self.cache = json.load(f)
             except: self.cache = {}
-        self.cf_ranges = self._load_cf_ranges()
         self.reader = None
         if HAS_GEOIP_LIB and os.path.exists(MMDB_FILE):
-            try:
-                self.reader = geoip2.database.Reader(MMDB_FILE)
-            except Exception: pass
-
-    def _load_cf_ranges(self) -> list:
-        ranges = []
-        try:
-            if not os.path.exists(CLOUDFLARE_IPS_CACHE) or (time.time() - os.path.getmtime(CLOUDFLARE_IPS_CACHE) > 86400):
-                v4 = requests.get('https://www.cloudflare.com/ips-v4', timeout=5).text.splitlines()
-                v6 = requests.get('https://www.cloudflare.com/ips-v6', timeout=5).text.splitlines()
-                all_ranges = v4 + v6
-                with open(CLOUDFLARE_IPS_CACHE, 'w') as f: json.dump(all_ranges, f)
-            else:
-                with open(CLOUDFLARE_IPS_CACHE, 'r') as f: all_ranges = json.load(f)
-            for r in all_ranges:
-                try: ranges.append(ipaddress.ip_network(r.strip()))
-                except: pass
-        except: pass
-        return ranges
-
-    def is_cloudflare(self, ip: str) -> bool:
-        try:
-            ipa = ipaddress.ip_address(ip)
-            for network in self.cf_ranges:
-                if ipa in network: return True
-        except: return False
-        return False
+            try: self.reader = geoip2.database.Reader(MMDB_FILE)
+            except: pass
 
     def get_country(self, host: str) -> str:
         if host in self.cache: return self.cache[host]
         try: ip = socket.gethostbyname(host)
         except: self.cache[host] = 'XX'; return 'XX'
-        if self.is_cloudflare(ip): self.cache[host] = 'CF'; return 'CF'
+        
+        # Simple Cloudflare check
+        if ip.startswith("104.") or ip.startswith("172."):
+             self.cache[host] = 'CF'; return 'CF'
+
         if self.reader:
             try:
-                response = self.reader.country(ip)
-                cc = response.country.iso_code
-                if cc:
-                    self.cache[host] = cc
-                    return cc
-            except: pass
-        apis = [f"http://ip-api.com/json/{ip}", f"https://ipwho.is/{ip}"]
-        for url in apis:
-            try:
-                resp = requests.get(url, timeout=3).json()
-                cc = resp.get('countryCode') or resp.get('country_code')
+                cc = self.reader.country(ip).country.iso_code
                 if cc: self.cache[host] = cc; return cc
-            except: continue
+            except: pass
+        
+        # Fallback API (Slow, use sparingly)
+        try:
+            resp = requests.get(f"http://ip-api.com/json/{ip}", timeout=2).json()
+            cc = resp.get('countryCode')
+            if cc: self.cache[host] = cc; return cc
+        except: pass
+        
         self.cache[host] = 'XX'; return 'XX'
 
     def save_cache(self):
         with open(IP_CACHE_FILE, 'w', encoding='utf-8') as f: json.dump(self.cache, f, indent=2)
 
-# --- STAGES ---
+# ============================
+#       PROCESSING STAGES
+# ============================
 
 class Stage1_Fetcher:
     def fetch_url(self, item) -> tuple[str, str, bool]:
         if ABORT_FLAG: return item[0], "", False
         source_name, source_data = item
+        if not source_data.get("enabled", True): return source_name, "", False
         
-        # --- NEW: SKIP DISABLED CHANNELS ---
-        if not source_data.get("enabled", True):
-            return source_name, "", False
-        
-        if "subscription_url" in source_data:
-            print(f"  Downloading subscription: {source_name}")
-            try:
-                resp = requests.get(source_data["subscription_url"], timeout=GlobalConfig.TIMEOUT)
-                if resp.status_code == 200: return source_name, resp.text, True
-            except Exception: pass
-            return source_name, "", False
-        
-        url = f"https://t.me/s/{source_name}"
+        url = source_data.get("subscription_url") or f"https://t.me/s/{source_name}"
         try:
             resp = requests.get(url, timeout=GlobalConfig.TIMEOUT)
             if resp.status_code == 200: return source_name, resp.text, True
-        except Exception: pass
+        except: pass
         return source_name, "", False
 
     def run(self):
-        print("--- STAGE 1: CHANNEL FETCHER ---")
+        print("--- STAGE 1: FETCHER ---")
         if not os.path.exists(ASSETS_FILE): return
         with open(ASSETS_FILE, 'r', encoding='utf-8') as f: assets = json.load(f)
         if not os.path.exists(HTML_CACHE_DIR): os.makedirs(HTML_CACHE_DIR)
-        print(f"Fetching data from {len(assets)} sources (Timeout: {GlobalConfig.TIMEOUT}s)...")
+        
+        # Threaded Fetch
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             results = list(executor.map(self.fetch_url, list(assets.items())))
         
-        if ABORT_FLAG: return
-        success_count = 0
-        for source, content, success in results:
-            if success and content:
-                with open(os.path.join(HTML_CACHE_DIR, f"{source}.html"), 'w', encoding='utf-8') as f: f.write(content)
-                success_count += 1
-        print(f"Fetched {success_count} sources successfully.")
+        count = 0
+        for src, txt, ok in results:
+            if ok:
+                with open(os.path.join(HTML_CACHE_DIR, f"{src}.html"), 'w', encoding='utf-8') as f: f.write(txt)
+                count += 1
+        print(f"Fetched {count} sources.")
 
 class Stage2_Extractor:
     def __init__(self):
         self.geoip = GeoIP()
-        self.stats = {'total_raw': 0, 'protocol_counts': {}}
+        self.stats = {'total_raw': 0}
     
-    def process_and_enrich(self, config_str: str, source: str, key: int) -> dict | None:
-        config_str = config_str.split('<')[0]
-        if not Utils.is_valid_config(config_str): return None
-        ctype = Utils.detect_type(config_str)
-        if not ctype: return None
-        data = ConfigParser.parse(config_str)
-        if not data: return None
-
-        fields = {"vmess": ("add", "ps"), "vless": ("hostname", "hash"), "trojan": ("hostname", "hash"), "tuic": ("hostname", "hash"), "hy2": ("hostname", "hash"), "ss": ("server_address", "name")}
-        if ctype not in fields: return None
-        ip_field, name_field = fields[ctype]
-        host = data.get(ip_field)
-        if not host: return None
-
-        country = self.geoip.get_country(host)
-        flag = '❔' if country == 'XX' else ('🚩' if country == 'CF' else Utils.get_flag_emoji(country))
-        is_encrypted = ctype in ['ss', 'tuic', 'hy2'] or (ctype == 'vmess' and (data.get('tls') or data.get('scy') != 'none')) or 'security=tls' in config_str or 'security=reality' in config_str
-        security_emoji = '🔒' if is_encrypted else '🔓'
-        
-        new_name = f"{flag} {country} | {security_emoji} {ctype.upper()} | @{source} [{key+1}]"
-        
-        data[name_field] = new_name
-        final_config = ConfigParser.rebuild(data, ctype)
-        if not final_config: return None
-        return {'config': final_config.replace("amp%3B", ""), 'country': country, 'source': source, 'type': ctype}
-
     def run(self, progress_callback=None):
-        print("\n--- STAGE 2: CONFIG EXTRACTOR ---")
+        print("\n--- STAGE 2: EXTRACTOR ---")
         if not os.path.exists(ASSETS_FILE): return
         with open(ASSETS_FILE, 'r', encoding='utf-8') as f: assets = json.load(f)
-        configs_list = {}
-        for source, data in assets.items():
+        
+        # 1. Gather Links
+        raw_configs = []
+        sources = [s for s, d in assets.items() if d.get("enabled", True)]
+        total = len(sources)
+        
+        for idx, src in enumerate(sources):
+            if ABORT_FLAG: return
+            # UPDATE PROGRESS LESS FREQUENTLY TO PREVENT UI FREEZE
+            if progress_callback and idx % 5 == 0: 
+                progress_callback(idx / total)
+                
+            fpath = os.path.join(HTML_CACHE_DIR, f"{src}.html")
+            if os.path.exists(fpath):
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                    links = Utils.extract_links(f.read())
+                    # Limit configs per channel
+                    links = links[-GlobalConfig.MAX_CONFIGS_PER_CHANNEL:]
+                    for l in links: raw_configs.append((src, l))
+
+        # 2. Process & Enrich
+        print(f"Processing {len(raw_configs)} raw configs...")
+        processed = []
+        
+        for i, (src, conf) in enumerate(raw_configs):
             if ABORT_FLAG: return
             
-            # Skip disabled in Stage 2 as well, just in case old cache exists
-            if not data.get("enabled", True): continue
+            # Parse
+            data = ConfigParser.parse(conf)
+            if not data: continue
+            
+            # Enrich
+            ctype = data['protocol']
+            fields = {"vmess": "add", "vless": "hostname", "trojan": "hostname", "tuic": "hostname", "hy2": "hostname", "ss": "server_address"}
+            host = data.get(fields.get(ctype, ""))
+            if not host: continue
+            
+            cc = self.geoip.get_country(host)
+            flag = Utils.get_flag_emoji(cc)
+            name_field = 'ps' if ctype == 'vmess' else ('name' if ctype == 'ss' else 'hash')
+            
+            # Rename
+            data[name_field] = f"{flag} {cc} | {ctype.upper()} | @{src}"
+            
+            # Rebuild
+            final = ConfigParser.rebuild(data, ctype)
+            if final: processed.append(final)
 
-            html_path = os.path.join(HTML_CACHE_DIR, f"{source}.html")
-            if os.path.exists(html_path):
-                with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    links = Utils.extract_links(f.read())
-                    if links: configs_list[source] = list(set(links))
-
-        all_processed = []
-        sources_valid = {}
-        total_sources = len(configs_list)
-        print(f"Processing configs from {total_sources} sources...")
-        
-        for idx, (source, configs) in enumerate(configs_list.items()):
-            if ABORT_FLAG: return
-            if progress_callback: progress_callback((idx + 1) / total_sources)
-            to_process = configs[-GlobalConfig.MAX_CONFIGS_PER_CHANNEL:]
-            offset = len(configs) - len(to_process)
-            for i, conf in enumerate(to_process):
-                res = self.process_and_enrich(conf, source, i + offset)
-                if res:
-                    all_processed.append(res)
-                    sources_valid[source] = True
-                    self.stats['total_raw'] += 1
-                    self.stats['protocol_counts'][res['type']] = self.stats['protocol_counts'].get(res['type'], 0) + 1
         self.geoip.save_cache()
-
-        print("Writing extracted files...")
+        self.stats['total_raw'] = len(processed)
+        
+        # Save Raw List
+        with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            f.write("\n".join(processed))
+            
+        # Clean previous output
         if os.path.exists(OUTPUT_DIR):
             try: shutil.rmtree(OUTPUT_DIR)
             except: pass
-        for p in [os.path.join(LOCATION_DIR, "normal"), os.path.join(LOCATION_DIR, "base64"), os.path.join(CHANNEL_SUBS_DIR, "normal"), os.path.join(CHANNEL_SUBS_DIR, "base64")]: os.makedirs(p, exist_ok=True)
-
-        main_configs = [x['config'] for x in all_processed]
-        grouped = {}
-        for x in all_processed: grouped.setdefault(x['source'], []).append(x['config'])
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        channel_files_count = 0
-        for src, confs in grouped.items():
-            plain = "\n".join(confs)
-            fname = re.sub(r'[^a-zA-Z0-9_-]', '', src)
-            with open(os.path.join(CHANNEL_SUBS_DIR, "normal", fname), 'w', encoding='utf-8') as f: f.write(plain)
-            with open(os.path.join(CHANNEL_SUBS_DIR, "base64", fname), 'w', encoding='utf-8') as f: f.write(base64.b64encode(plain.encode()).decode())
-            channel_files_count += 1
-
-        loc_grouped = {}
-        for x in all_processed:
-            loc_grouped.setdefault(x['country'], []).append(x['config'])
-        
-        for loc, confs in loc_grouped.items():
-            if not loc: continue
-            plain = "\n".join(confs)
-            with open(os.path.join(LOCATION_DIR, "normal", loc), 'w', encoding='utf-8') as f: f.write(plain)
-            with open(os.path.join(LOCATION_DIR, "base64", loc), 'w', encoding='utf-8') as f: f.write(base64.b64encode(plain.encode()).decode())
-
-        with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f: f.write("\n".join(main_configs))
-
-        summary = {"meta": {"last_updated": datetime.now(timezone.utc).isoformat(), "author": f"{GlobalConfig.BRANDING}_Python"}, "sources": {"total": len(assets), "valid": len(sources_valid)}, "configs": self.stats, "outputs": {"channel_files": channel_files_count, "country_distribution": {k: len(v) for k,v in loc_grouped.items()}}}
-        with open(SUMMARY_FILE, 'w', encoding='utf-8') as f: json.dump(summary, f, indent=2)
+        # Write Summary
+        with open(SUMMARY_FILE, 'w', encoding='utf-8') as f: 
+            json.dump({"configs": self.stats, "sources": {"valid": len(sources)}, "outputs": {"country_distribution": {}}}, f)
 
 class Stage3_Deduplicator:
     def run(self):
         print("\n--- STAGE 3: DEDUPLICATION ---")
-        if ABORT_FLAG: return
         if not os.path.exists(FINAL_CONFIG_FILE): return
-        with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f: lines = [l.strip() for l in f if l.strip()]
+        with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            unique = list(set([l.strip() for l in f if l.strip()]))
         
-        assets = {}
-        if os.path.exists(ASSETS_FILE):
-            with open(ASSETS_FILE, 'r', encoding='utf-8') as f: assets = json.load(f)
-
-        seen = {}
-        unique = []
-        for l in lines:
-            if l not in seen:
-                seen[l] = True
-                unique.append(l)
-
-        final_output = unique
-        
-        api_data = []
-        for conf in final_output:
-            dt = ConfigParser.parse(conf)
-            if not dt: continue
-            ctype = dt['protocol']
-            name_field = 'ps' if ctype == 'vmess' else ('name' if ctype == 'ss' else 'hash')
-            name = dt.get(name_field, "")
-            src_username = 'unknown'
-            parts = name.split('|')
-            if len(parts) >= 4: src_username = parts[3].strip().lstrip('@')
-            chan_info = assets.get(src_username, {'title': 'Unknown', 'logo': ''})
-            effective_type = 'reality' if ctype == 'vless' and 'security=reality' in conf else ctype
-            api_data.append({'channel': {'username': src_username, 'title': chan_info.get('title'), 'logo': chan_info.get('logo')}, 'type': effective_type, 'config': conf})
-
-        with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f: f.write("\n".join(final_output))
-        
-        mix_dir = os.path.join(SUBS_XRAY_DIR, 'normal'); mix_dir_b64 = os.path.join(SUBS_XRAY_DIR, 'base64')
-        os.makedirs(mix_dir, exist_ok=True); os.makedirs(mix_dir_b64, exist_ok=True)
-        header = self._hiddify_header(f"{GlobalConfig.BRANDING} | MIX")
-        content = header + "\n".join(final_output)
-        with open(os.path.join(mix_dir, "mix"), 'w', encoding='utf-8') as f: f.write(content)
-        with open(os.path.join(mix_dir_b64, "mix"), 'w', encoding='utf-8') as f: f.write(base64.b64encode(content.encode()).decode())
-        
-        os.makedirs(API_DIR, exist_ok=True)
-        with open(API_OUTPUT_FILE, 'w', encoding='utf-8') as f: json.dump(api_data, f, indent=2, ensure_ascii=False)
-        print(f"Unique configs: {len(final_output)}")
-
-    def _hiddify_header(self, title):
-        b64_title = base64.b64encode(title.encode()).decode()
-        return f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n#support-url: https://t.me/yebekhe\n\n"
+        with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            f.write("\n".join(unique))
+        print(f"Unique configs: {len(unique)}")
 
 class Stage3_5_Speedtest:
     def run(self, progress_callback=None):
-        print("\n--- STAGE 3.5: SPEEDTEST FILTERING ---")
+        print("\n--- STAGE 3.5: SPEEDTEST ---")
         if ABORT_FLAG: return None
         
-        global CURRENT_SUBPROCESS
+        # CHECK EXECUTABLE
         is_windows = sys.platform == "win32"
         exe_name = "xray-knife.exe" if is_windows else "./xray-knife"
         exe_path = os.path.join(WORK_DIR, exe_name)
+        if not os.path.exists(exe_path) and not is_windows:
+             exe_path = os.path.join(WORK_DIR, "xray-knife") # Try without ./
+
+        # ANDROID EXECUTION CHECK
+        if "ANDROID_ARGUMENT" in os.environ:
+            print("⚠️ Android OS restricts executing binaries in user data.")
+            print("⚠️ Skipping Speedtest. Using RAW configs.")
+            return None # Fallback to raw list
 
         if not os.path.exists(exe_path):
-            print(f"⚠️ {exe_name} not found. Skipping speedtest.")
-            return None
-
-        if not os.path.exists(FINAL_CONFIG_FILE):
-            print("No config file to test.")
+            print("⚠️ Xray-Knife not found. Skipping.")
             return None
 
         if progress_callback: progress_callback(None)
-
-        mdelay_ms = str(GlobalConfig.TIMEOUT * 1000)
-        print(f"Running Xray-Knife (Max Delay: {mdelay_ms}ms)...")
         
-        valid_output = os.path.join(WORK_DIR, "valid_configs.txt")
-        if os.path.exists(valid_output): os.remove(valid_output)
-
-        cmd = [
-            exe_path, 
-            "http", 
-            "-f", FINAL_CONFIG_FILE,
-            "-o", valid_output,
-            "-d", mdelay_ms,
-            "--thread", "20"
-        ]
-
-        valid_configs = []
-
+        valid_out = os.path.join(WORK_DIR, "valid.txt")
+        if os.path.exists(valid_out): os.remove(valid_out)
+        
+        cmd = [exe_path, "http", "-f", FINAL_CONFIG_FILE, "-o", valid_out, "-d", str(GlobalConfig.TIMEOUT*1000), "--thread", "20"]
+        
         try:
-            CURRENT_SUBPROCESS = subprocess.Popen(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            )
-
+            global CURRENT_SUBPROCESS
+            CURRENT_SUBPROCESS = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', creationflags=subprocess.CREATE_NO_WINDOW if is_windows else 0)
+            
             while True:
                 line = CURRENT_SUBPROCESS.stdout.readline()
-                if not line and CURRENT_SUBPROCESS.poll() is not None:
-                    break
-                if line:
-                    sys.stdout.write(line)
+                if not line and CURRENT_SUBPROCESS.poll() is not None: break
+                if line: sys.stdout.write(line)
             
             CURRENT_SUBPROCESS = None
-
-            if ABORT_FLAG:
-                print("Speedtest Aborted.")
-                return None
-
-            if os.path.exists(valid_output) and os.path.getsize(valid_output) > 0:
-                with open(valid_output, 'r', encoding='utf-8') as f:
-                    valid_data = f.read()
-                    valid_configs = [l.strip() for l in valid_data.splitlines() if l.strip()]
+            
+            if ABORT_FLAG: return None
+            
+            if os.path.exists(valid_out) and os.path.getsize(valid_out) > 0:
+                with open(valid_out, 'r', encoding='utf-8') as f: lines = [l.strip() for l in f if l.strip()]
+                print(f"✅ Active Configs: {len(lines)}")
                 
-                print(f"✅ Speedtest Complete. Active Configs: {len(valid_configs)}")
-                
-                # 1. Overwrite Main Config
-                with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    f.write(valid_data)
-                
-                # 2. Update Mix File
-                self._update_mix_file(valid_configs)
-
-                # 3. Update API File
-                self._sync_api_file()
-                
-                return valid_configs
+                # OVERWRITE MAIN FILE WITH VALID ONES
+                with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f: f.write("\n".join(lines))
+                return lines
             else:
-                print("⚠️ Speedtest found NO valid configs or failed. Keeping original list.")
+                print("⚠️ No valid configs found. Using original list.")
                 return None
-                
         except Exception as e:
-            if not ABORT_FLAG:
-                print(f"❌ Error executing speedtest: {e}")
+            print(f"Speedtest Error: {e}")
             return None
 
-    def _update_mix_file(self, configs):
-        mix_dir = os.path.join(SUBS_XRAY_DIR, 'normal')
-        mix_dir_b64 = os.path.join(SUBS_XRAY_DIR, 'base64')
-        
-        b64_title = base64.b64encode(f"{GlobalConfig.BRANDING} | MIX".encode()).decode()
-        header = f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n#support-url: https://t.me/yebekhe\n\n"
-        content = header + "\n".join(configs)
-        
-        if os.path.exists(mix_dir):
-            with open(os.path.join(mix_dir, "mix"), 'w', encoding='utf-8') as f: f.write(content)
-        if os.path.exists(mix_dir_b64):
-            with open(os.path.join(mix_dir_b64, "mix"), 'w', encoding='utf-8') as f: f.write(base64.b64encode(content.encode()).decode())
-
-    def _sync_api_file(self):
-        if not os.path.exists(API_OUTPUT_FILE) or not os.path.exists(FINAL_CONFIG_FILE): return
-        try:
-            with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                valid_lines = set([l.strip() for l in f if l.strip()])
-            with open(API_OUTPUT_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            new_data = [item for item in data if item.get('config') in valid_lines]
-            with open(API_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                json.dump(new_data, f, indent=2, ensure_ascii=False)
-        except: pass
-
 class Stage4_Sorter:
-    def create_fake_config(self, name):
-        encoded = urllib.parse.quote(name.lstrip('#'))
-        return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=none&type=ws&path=/#{encoded}"
-
-    def get_addr_type(self, config):
-        try:
-            parsed = urllib.parse.urlparse(config)
-            host = parsed.hostname
-            if not host: 
-                data = ConfigParser.parse(config)
-                if data: host = data.get('add') or data.get('server_address') or data.get('hostname')
-            if not host: return 'domain'
-            ip = ipaddress.ip_address(host.strip('[]'))
-            return 'ipv4' if ip.version == 4 else 'ipv6'
-        except: return 'domain'
-
     def run(self, config_list=None):
-        print("\n--- STAGE 4: SORTING & FAKES ---")
+        print("\n--- STAGE 4: SORTING ---")
         if ABORT_FLAG: return
         
-        # Use filtered list if available
-        if config_list and len(config_list) > 0:
-            lines = config_list
+        # 1. Clean Output Dirs
+        for d in [LOCATION_DIR, CHANNEL_SUBS_DIR, SUBS_XRAY_DIR]:
+            if os.path.exists(d): shutil.rmtree(d)
+            os.makedirs(d, exist_ok=True)
+            os.makedirs(os.path.join(d, "normal"), exist_ok=True)
+            os.makedirs(os.path.join(d, "base64"), exist_ok=True)
+
+        # 2. Get Configs (Prefer Filtered List)
+        lines = []
+        if config_list: lines = config_list
         elif os.path.exists(FINAL_CONFIG_FILE):
             with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f: lines = [l.strip() for l in f if l.strip()]
-        else:
-            return
-
-        sorted_confs = {}
-        for conf in lines:
-            ctype = Utils.detect_type(conf)
-            addr = self.get_addr_type(conf)
-            if not ctype: continue
-            sorted_confs.setdefault(ctype, {}).setdefault(addr, []).append(conf)
-            if ctype == 'vless' and 'security=reality' in conf: sorted_confs.setdefault('reality', {}).setdefault(addr, []).append(conf)
-            if 'type=xhttp' in conf: sorted_confs.setdefault('xhttp', {}).setdefault(addr, []).append(conf)
-
-        fakes = [self.create_fake_config(n) for n in GlobalConfig.FAKE_CONFIGS]
         
-        for p_type, addr_groups in sorted_confs.items():
-            all_for_type = []
-            for addr, confs in addr_groups.items():
-                fname = f"{p_type}_{addr}"
-                content_list = fakes + confs
-                self._write_sub(fname, content_list, f"{GlobalConfig.BRANDING} | {p_type.upper()} {addr.upper()}")
-                all_for_type.extend(confs)
-            if all_for_type:
-                content_list = fakes + all_for_type
-                self._write_sub(p_type, content_list, f"{GlobalConfig.BRANDING} | {p_type.upper()}")
+        if not lines: return
 
-    def _write_sub(self, name, configs, title):
-        header = self._hiddify_header(title)
-        plain = header + "\n".join(configs)
+        # 3. Sort
+        sorted_data = {}
+        for c in lines:
+            ctype = Utils.detect_type(c)
+            if not ctype: continue
+            sorted_data.setdefault(ctype, []).append(c)
+        
+        fakes = [f"vless://000@127.0.0.1:443?type=ws&path=/#{urllib.parse.quote(n)}" for n in GlobalConfig.FAKE_CONFIGS]
+        
+        # 4. Write Files
+        # A. MIX File (Everything)
+        self.write_sub("mix", fakes + lines)
+        
+        # B. Protocol Files
+        for p, confs in sorted_data.items():
+            self.write_sub(p, fakes + confs)
+
+    def write_sub(self, name, configs):
+        plain = "\n".join(configs)
         b64 = base64.b64encode(plain.encode()).decode()
+        
+        # Write to SUBS_XRAY_DIR (which main.py looks at)
         p_norm = os.path.join(SUBS_XRAY_DIR, 'normal', name)
         p_b64 = os.path.join(SUBS_XRAY_DIR, 'base64', name)
+        
         with open(p_norm, 'w', encoding='utf-8') as f: f.write(plain)
         with open(p_b64, 'w', encoding='utf-8') as f: f.write(b64)
-
-    def _hiddify_header(self, title):
-        b64_title = base64.b64encode(title.encode()).decode()
-        return f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n#support-url: https://t.me/yebekhe\n\n"
 
 class Stage5_Converters:
     def run(self, progress_callback=None):
@@ -839,26 +630,13 @@ class Stage5_Converters:
         with open(os.path.join(surf_dir, filename), 'w', encoding='utf-8') as f: f.write(final_ini)
 
 # --- Expose Functions for GUI ---
-def init_globals(settings):
-    GlobalConfig.update(settings)
-
-def run_stage_1():
-    Stage1_Fetcher().run()
-
+def init_globals(settings): GlobalConfig.update(settings)
+def run_stage_1(): Stage1_Fetcher().run()
 def run_stage_2_5(cb=None, convert=True):
     Stage2_Extractor().run(progress_callback=cb)
     Stage3_Deduplicator().run()
-    
-    # 3.5: Returns the filtered list
-    valid_list = Stage3_5_Speedtest().run(progress_callback=cb)
-    
-    # 4: Sorts ONLY the filtered list (or falls back if none)
-    Stage4_Sorter().run(config_list=valid_list)
-    
-    if convert:
-        Stage5_Converters().run(progress_callback=cb)
-    else:
-        print("Skipping Converters.")
+    valid = Stage3_5_Speedtest().run(progress_callback=cb)
+    Stage4_Sorter().run(config_list=valid)
 
 if __name__ == "__main__":
     init_globals({})
