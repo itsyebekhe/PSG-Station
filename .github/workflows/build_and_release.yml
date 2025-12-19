@@ -43,19 +43,14 @@ jobs:
         with:
           channel: stable
 
-      # --- TRICK: Add geoip2 ONLY for Windows ---
+      # Windows-Only Trick for GeoIP2
       - name: Inject GeoIP2 into pyproject.toml
         shell: pwsh
         run: |
           $file = "pyproject.toml"
           $content = Get-Content $file
-          # Find the dependencies line and add geoip2
           $newContent = $content -replace '"requests"', '"requests", "geoip2"'
           Set-Content $file $newContent
-          
-          # Verify change
-          Write-Host "Modified pyproject.toml dependencies:"
-          Get-Content $file | Select-String "dependencies" -Context 0, 5
 
       - name: Build Windows EXE
         shell: pwsh
@@ -85,7 +80,7 @@ jobs:
           path: build/windows/PSG_Station_Windows.zip
 
   # ------------------------------------
-  # 2. BUILD ANDROID (APK)
+  # 2. BUILD ANDROID (SIGNED)
   # ------------------------------------
   build-android:
     runs-on: ubuntu-latest
@@ -107,17 +102,25 @@ jobs:
       - name: Install Dependencies
         run: pip install flet requests
 
+      # Decode the keystore from GitHub Secrets
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > upload-keystore.jks
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      # FIX: Add '|| true' to prevent 'Broken Pipe' from failing the build
       - name: Accept Android Licenses
         run: |
-          yes "y" | head -n 100 | flutter doctor --android-licenses
+          yes "y" | head -n 100 | flutter doctor --android-licenses || true
 
       - name: Build APK
+        env:
+          # Pass passwords securely to Flet
+          FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: flet build apk --verbose
 
       - name: Upload Artifact
