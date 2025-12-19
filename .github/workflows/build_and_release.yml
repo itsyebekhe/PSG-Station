@@ -5,18 +5,23 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release Version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0-manual'
 
 permissions:
   contents: write
 
 jobs:
   # ------------------------------------
-  # 1. BUILD WINDOWS
+  # 1. BUILD WINDOWS (CORRECTED)
   # ------------------------------------
   build-windows:
     runs-on: windows-latest
     env:
-      PYTHONIOENCODING: utf-8  # <--- FIX FOR CHARMAP ERROR
+      PYTHONIOENCODING: utf-8
       PYTHONLEGACYWINDOWSSTDIO: utf-8
     steps:
       - name: Checkout code
@@ -29,7 +34,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install flet requests geoip2
+          pip install flet requests 
           pip install -r requirements.txt
 
       - name: Setup Flutter
@@ -43,23 +48,30 @@ jobs:
       - name: Prepare Release Folder
         shell: pwsh
         run: |
-          $buildDir = "build\windows\runner\Release"
+          # Flet moves the final EXE and DLLs here
+          $buildDir = "build\windows"
+          
+          # 1. Copy external assets next to the EXE
           Copy-Item -Path "src\channelsData" -Destination $buildDir -Recurse
           Copy-Item -Path "src\templates" -Destination $buildDir -Recurse
           Copy-Item -Path "src\settings.json" -Destination $buildDir
+
+          # 2. List files for debugging (visible in GitHub Action logs)
+          Write-Host "Contents of build output:"
+          Get-ChildItem -Path $buildDir
 
       - name: Zip Windows Build
         uses: thedoctor0/zip-release@0.7.6
         with:
           type: 'zip'
           filename: 'PSG_Station_Windows.zip'
-          directory: 'build/windows/runner/Release'
+          directory: 'build/windows'  # <--- The correct folder
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: build/windows/runner/Release/PSG_Station_Windows.zip
+          path: build/windows/PSG_Station_Windows.zip
 
   # ------------------------------------
   # 2. BUILD ANDROID (APK)
@@ -82,13 +94,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        # Removed geoip2 here too
         run: pip install flet requests
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+
+      # Fix for License Error
+      - name: Accept Android Licenses
+        run: |
+          yes | flutter doctor --android-licenses
 
       - name: Build APK
         run: flet build apk --verbose
@@ -105,8 +121,23 @@ jobs:
   create-release:
     needs: [build-windows, build-android]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Run if it's a Tag push OR a Manual Dispatch
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Logic to determine which version string to use
+      - name: Determine Tag Name
+        id: tag_info
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "TAG_NAME=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
@@ -123,6 +154,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          name: Release ${{ steps.tag_info.outputs.TAG_NAME }}
+          tag_name: ${{ steps.tag_info.outputs.TAG_NAME }}
           files: |
             PSG_Station_Windows.zip
             PSG_Station_Android.apk
