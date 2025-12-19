@@ -9,642 +9,494 @@ import shutil
 import zipfile
 import stat
 import requests
-import proxy_processor  # Your backend file
+import time
+import proxy_processor
 
-# --- Configuration (MERGED FIX: Persistence + User Data) ---
+# ==========================================
+# ⚙️ CONFIGURATION & PATHS
+# ==========================================
+
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    # 1. Android / Linux / MacOS (Persistent User Data)
-    if platform.system() != "Windows":
-        return os.path.expanduser("~")
-    
-    # 2. Windows EXE (Portable - Next to EXE)
+    if "ANDROID_ARGUMENT" in os.environ:
+        base = os.environ.get("HOME", "/data/data/com.psgstation/files")
+        path = os.path.join(base, "psg_data")
+        if not os.path.exists(path): 
+            try: os.makedirs(path)
+            except: pass
+        return path
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    
-    # 3. Windows Script (Current Folder)
     return os.getcwd()
 
-# Set Global Working Directory
 WORK_DIR = get_work_dir()
 
-# --- PATH DEFINITIONS ---
-
-# 1. Channels Logic (User Editable vs Bundled)
 USER_CHANNELS_DIR = os.path.join(WORK_DIR, "channelsData")
 USER_ASSETS_FILE = os.path.join(USER_CHANNELS_DIR, "channelsAssets.json")
 BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 
-# 2. General Settings & Output
 SETTINGS_FILE = os.path.join(WORK_DIR, "settings.json")
 SUMMARY_FILE = os.path.join(WORK_DIR, "subscriptions", "summary.json")
 CONFIG_FILE = os.path.join(WORK_DIR, "config.txt")
 
-# 3. Xray Knife
 IS_WINDOWS = sys.platform == "win32"
 XRAY_KNIFE_EXE = "xray-knife.exe" if IS_WINDOWS else "xray-knife"
 XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 
-# GitHub Repo Info
 REPO_OWNER = "lilendian0x00"
 REPO_NAME = "xray-knife"
 
-# --- Theme Constants (2025 Dark Mode) ---
-COLOR_BG = "#0F1115"        # Deep Slate
-COLOR_SURFACE = "#181B21"   # Card Background
-COLOR_PRIMARY = "#6C5CE7"   # Purple
-COLOR_SECONDARY = "#00CEC9" # Teal
-COLOR_DANGER = "#FF7675"    # Red
-COLOR_TEXT = "#DFE6E9"
-COLOR_TEXT_DIM = "#636E72"
-BORDER_RADIUS = 12
+COLOR_BG = "#121212"
+COLOR_CARD = "#1E1E1E"
+COLOR_PRIMARY = "#BB86FC"
+COLOR_ACCENT = "#03DAC6"
+COLOR_ERROR = "#CF6679"
+COLOR_TEXT = "#E0E0E0"
+COLOR_DIM = "#A0A0A0"
 
-# --- Default Settings ---
 DEFAULT_SETTINGS = {
     "branding_name": "PSG",
     "max_per_channel": 40,
     "timeout": 10,
     "enable_converters": True,
-    "fake_configs": "#همکاری_ملی,#جاویدشاه,#KingRezaPahlavi"
+    "fake_configs": "#همکاری_ملی,#جاویدشاه"
 }
 
-# --- Helpers ---
-def get_opacity_color(color_hex, opacity):
-    if color_hex.startswith("#"): color_hex = color_hex[1:]
-    alpha = int(opacity * 255)
-    return f"#{alpha:02x}{color_hex}"
-
-def get_target_asset_name():
-    """Determines the correct zip filename for the current OS/Arch."""
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    if system == "windows": os_str = "windows"
-    elif system == "linux": os_str = "linux"
-    elif system == "darwin": os_str = "macos"
-    else: return None, "Unsupported OS"
-
-    if "aarch64" in machine or "arm64" in machine: arch_str = "arm64-v8a"
-    elif "64" in machine: arch_str = "64"
-    else: return None, f"Unsupported Architecture: {machine}"
-
-    return f"Xray-knife-{os_str}-{arch_str}.zip", None
+# ==========================================
+# 🛠️ UTILITIES
+# ==========================================
 
 class Logger:
-    """Redirects stdout to the Flet ListView."""
     def __init__(self, log_control):
         self.log_control = log_control
         self.terminal = sys.stdout
 
     def write(self, message):
-        # 1. Try printing to the real terminal (for debugging)
-        # If it fails due to encoding (e.g. Windows Console), fallback to ASCII
-        try:
-            self.terminal.write(message)
-        except UnicodeEncodeError:
-            # Replace unknown chars (emojis) with '?' for the console
-            try:
-                self.terminal.write(message.encode('ascii', 'replace').decode('ascii'))
-            except: pass
-        except Exception: 
-            pass
-
-        # 2. Update the Flet UI (This always supports Emojis/UTF-8)
+        try: self.terminal.write(message)
+        except: pass
         if message.strip():
             self.log_control.controls.append(
-                ft.Text(f"> {message.strip()}", font_family="Consolas", size=12, color=COLOR_TEXT_DIM)
+                ft.Text(f"> {message.strip()}", font_family="monospace", size=11, color=COLOR_DIM)
             )
             self.log_control.update()
             self.log_control.scroll_to(offset=-1, duration=300, curve=ft.AnimationCurve.EASE_OUT)
 
     def flush(self):
-        try:
-            self.terminal.flush()
+        try: self.terminal.flush()
         except: pass
+
+def get_target_asset_name():
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if "android" in system or "linux" in system: 
+        if "aarch64" in machine or "arm64" in machine: return "Xray-knife-linux-arm64-v8a.zip", None
+        return "Xray-knife-linux-64.zip", None
+    if system == "windows": return "Xray-knife-windows-64.zip", None
+    if system == "darwin": return "Xray-knife-macos-64.zip", None
+    return None, "Unknown OS"
+
+# ==========================================
+# 📱 MAIN APPLICATION
+# ==========================================
 
 def main(page: ft.Page):
-    # 1. Initialize Settings
-    default_settings_src = os.path.join(INTERNAL_DIR, "settings.json")
-    if not os.path.exists(SETTINGS_FILE) and os.path.exists(default_settings_src):
-        try: shutil.copy(default_settings_src, SETTINGS_FILE)
-        except: pass
+    if not os.path.exists(SETTINGS_FILE):
+        src = os.path.join(INTERNAL_DIR, "settings.json")
+        if os.path.exists(src): 
+            try: shutil.copy(src, SETTINGS_FILE)
+            except: pass
 
-    # 2. Initialize Channels (Extract bundled file to user folder)
-    # This enables the "User Editable" feature
     if not os.path.exists(USER_ASSETS_FILE):
-        try:
-            if not os.path.exists(USER_CHANNELS_DIR):
-                os.makedirs(USER_CHANNELS_DIR)
-            if os.path.exists(BUNDLED_ASSETS_FILE):
-                shutil.copy(BUNDLED_ASSETS_FILE, USER_ASSETS_FILE)
-        except: pass
+        if not os.path.exists(USER_CHANNELS_DIR): os.makedirs(USER_CHANNELS_DIR)
+        if os.path.exists(BUNDLED_ASSETS_FILE): 
+            try: shutil.copy(BUNDLED_ASSETS_FILE, USER_ASSETS_FILE)
+            except: pass
 
-    # --- Page Configuration ---
     page.title = "PSG Station"
     page.bgcolor = COLOR_BG
-    page.padding = 0
-    # Resized to 1/3 of previous width (850 -> 360)
-    page.window.width = 450
-    page.window.height = 700
     page.theme_mode = ft.ThemeMode.DARK
-    page.window.icon = "icon.png" # Mapped automatically in Flet Build
+    page.padding = 0
+    page.window.width = 450
+    page.window.height = 800
     
-    is_processing = False
-
-    # --- Data Management ---
-    def load_settings():
-        if os.path.exists(SETTINGS_FILE):
+    # --- Data Helpers ---
+    def load_json(path, default={}):
+        if os.path.exists(path):
             try:
-                with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                    return {**DEFAULT_SETTINGS, **json.load(f)}
+                with open(path, 'r', encoding='utf-8') as f: return json.load(f)
             except: pass
-        return DEFAULT_SETTINGS.copy()
+        return default
 
-    def save_settings(data):
-        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
+    def save_json(path, data):
+        with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4)
 
-    def load_channels():
-        # Always try to read the external user file first
-        if os.path.exists(USER_ASSETS_FILE):
+    # --- Shared State & Controls ---
+    log_lv = ft.ListView(expand=True, spacing=2, auto_scroll=False)
+    logger = Logger(log_lv)
+    
+    status_ring = ft.ProgressRing(width=120, height=120, stroke_width=8, color=COLOR_PRIMARY, value=0)
+    status_icon = ft.Icon(ft.Icons.POWER_SETTINGS_NEW_ROUNDED, size=50, color=COLOR_PRIMARY)
+    status_text = ft.Text("Ready", size=16, weight="bold")
+
+    def stat_card(icon, label, value, color):
+        return ft.Container(
+            content=ft.Column([
+                ft.Icon(icon, color=color, size=24),
+                ft.Text(value, size=20, weight="bold"),
+                ft.Text(label, size=10, color=COLOR_DIM)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor=COLOR_CARD, border_radius=12, padding=15, expand=True
+        )
+
+    st_raw = stat_card(ft.Icons.DATA_USAGE, "Configs", "-", COLOR_PRIMARY)
+    st_loc = stat_card(ft.Icons.PUBLIC, "Countries", "-", COLOR_ACCENT)
+    st_src = stat_card(ft.Icons.SOURCE, "Sources", "-", COLOR_ERROR)
+
+    # --- File Picker for Export ---
+    export_ref = ft.Ref() # Holds the path of the file user wants to save
+    
+    def on_save_result(e: ft.FilePickerResultEvent):
+        if e.path:
             try:
-                with open(USER_ASSETS_FILE, 'r', encoding='utf-8') as f: 
-                    return json.load(f)
-            except: pass
-        
-        # Fallback to bundled if external doesn't exist
-        if os.path.exists(BUNDLED_ASSETS_FILE):
-            try:
-                with open(BUNDLED_ASSETS_FILE, 'r', encoding='utf-8') as f: 
-                    return json.load(f)
-            except: pass
-        return {}
+                shutil.copy(export_ref.current, e.path)
+                page.open(ft.SnackBar(ft.Text(f"Saved to: {e.path}")))
+            except Exception as ex:
+                page.open(ft.SnackBar(ft.Text(f"Error: {ex}")))
 
-    def save_channels(data):
-        # Ensure the directory exists
-        if not os.path.exists(USER_CHANNELS_DIR):
-            os.makedirs(USER_CHANNELS_DIR)
-            
-        # Write to the user-editable file
+    file_picker = ft.FilePicker(on_result=on_save_result)
+    page.overlay.append(file_picker)
+
+    def trigger_export(path):
+        export_ref.current = path
+        # Automatically suggest the same filename
+        fname = os.path.basename(path)
+        file_picker.save_file(file_name=fname)
+
+    # --- Background Tasks ---
+    def load_stats():
+        d = load_json(SUMMARY_FILE)
+        if d:
+            st_raw.content.controls[1].value = str(d.get('configs', {}).get('total_raw', 0))
+            st_loc.content.controls[1].value = str(len(d.get('outputs', {}).get('country_distribution', {})))
+            st_src.content.controls[1].value = str(d.get('sources', {}).get('valid', 0))
+            page.update()
+
+    def download_tool(on_done=None):
         try:
-            with open(USER_ASSETS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4)
-        except Exception as ex:
-            print(f"Error saving channels: {ex}")
-
-    # --- Logic: Download Xray Knife ---
-    def download_xray_task(on_complete=None):
-        try:
-            target_file, error = get_target_asset_name()
-            if error:
-                sys.stdout.write(f"\n[Error] System Detection: {error}\n")
-                return
-
-            logger.write(f"Detected System Target: {target_file}")
-            logger.write("Fetching latest release info from GitHub...")
-
-            # 1. Get Release Info
-            api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-            resp = requests.get(api_url, timeout=10)
-            if resp.status_code != 200:
-                raise Exception(f"GitHub API Error: {resp.status_code}")
+            target, err = get_target_asset_name()
+            if err: return logger.write(f"Error: {err}")
             
-            data = resp.json()
-            download_url = None
+            logger.write(f"Downloading {target}...")
+            url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
+            assets = requests.get(url).json().get("assets", [])
+            dl_url = next((x["browser_download_url"] for x in assets if x["name"] == target), None)
             
-            for asset in data.get("assets", []):
-                if asset["name"] == target_file:
-                    download_url = asset["browser_download_url"]
-                    break
+            if not dl_url: return logger.write("Asset not found.")
             
-            if not download_url:
-                raise Exception(f"Asset {target_file} not found in latest release.")
-
-            # 2. Download to WORK_DIR
-            logger.write(f"Downloading {target_file}...")
-            zip_path = os.path.join(WORK_DIR, "xray_temp.zip")
+            zip_path = os.path.join(WORK_DIR, "tool.zip")
+            with requests.get(dl_url, stream=True) as r:
+                with open(zip_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
             
-            with requests.get(download_url, stream=True) as r:
-                r.raise_for_status()
-                with open(zip_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+            with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
             
-            # 3. Extract to WORK_DIR
-            logger.write("Extracting archive...")
-            extract_folder = os.path.join(WORK_DIR, "xray_temp_ext")
-            
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_folder)
-
-            # 4. Find and Move Binary
-            found = False
-            for root, dirs, files in os.walk(extract_folder):
-                for file in files:
-                    if file == XRAY_KNIFE_EXE or (not IS_WINDOWS and file == "xray-knife"):
-                        source = os.path.join(root, file)
-                        if os.path.exists(XRAY_KNIFE_PATH):
-                            os.remove(XRAY_KNIFE_PATH)
-                        shutil.move(source, XRAY_KNIFE_PATH)
-                        found = True
-                        break
-                if found: break
-
-            # 5. Cleanup
-            if os.path.exists(zip_path): os.remove(zip_path)
-            if os.path.exists(extract_folder): shutil.rmtree(extract_folder)
-
-            if not found:
-                raise Exception("Binary not found inside the downloaded archive.")
-
-            # 6. Permissions (Linux/Mac)
             if not IS_WINDOWS:
-                st = os.stat(XRAY_KNIFE_PATH)
-                os.chmod(XRAY_KNIFE_PATH, st.st_mode | stat.S_IEXEC)
-
-            logger.write("\n✅ Xray-Knife installed successfully!")
+                os.chmod(XRAY_KNIFE_PATH, 0o777)
+            try: os.remove(zip_path)
+            except: pass
             
-        except Exception as ex:
-            logger.write(f"\n[Error] Download Failed: {ex}\n")
-        finally:
-            if on_complete: on_complete()
+            logger.write("✅ Tool Ready.")
+            if on_done: on_done()
+        except Exception as e:
+            logger.write(f"Download Error: {e}")
 
-    # --- Dialogs & Modals ---
-
-    def open_settings(e):
-        current = load_settings()
-        
-        tf_brand = ft.TextField(label="Branding Name", value=current['branding_name'], border_color=COLOR_PRIMARY)
-        tf_max = ft.TextField(label="Max Configs/Channel", value=str(current['max_per_channel']), keyboard_type=ft.KeyboardType.NUMBER)
-        tf_fake = ft.TextField(label="Fake Configs (comma separated)", value=current['fake_configs'], multiline=True)
-        sw_conv = ft.Switch(label="Enable Converters (Singbox/Clash)", value=current['enable_converters'], active_color=COLOR_PRIMARY)
-
-        def save(e):
-            new_s = {
-                **current,
-                "branding_name": tf_brand.value,
-                "max_per_channel": int(tf_max.value) if tf_max.value.isdigit() else 40,
-                "fake_configs": tf_fake.value,
-                "enable_converters": sw_conv.value
-            }
-            save_settings(new_s)
-            page.close(dlg)
-            page.open(ft.SnackBar(ft.Text("Settings Saved!"), bgcolor=COLOR_PRIMARY))
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Settings", weight="bold"),
-            content=ft.Column([
-                ft.Text("Branding", color=COLOR_SECONDARY, size=12), tf_brand, tf_fake,
-                ft.Divider(height=20, color="transparent"),
-                ft.Text("Core", color=COLOR_SECONDARY, size=12), tf_max, sw_conv
-            ], tight=True, width=300),
-            actions=[
-                ft.TextButton("Cancel", on_click=lambda e: page.close(dlg)),
-                ft.ElevatedButton("Save", on_click=save, bgcolor=COLOR_PRIMARY, color="white")
-            ],
-            bgcolor=COLOR_SURFACE
-        )
-        page.open(dlg)
-
-    def open_channel_manager(e):
-        channels = load_channels()
-        lv_channels = ft.Column(scroll=ft.ScrollMode.AUTO, height=300, spacing=5)
-        tf_add = ft.TextField(hint_text="Channel (no @)", expand=True, height=45, content_padding=10, border_radius=8)
-
-        def refresh_list():
-            lv_channels.controls.clear()
-            for u in channels:
-                lv_channels.controls.append(
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon(ft.Icons.TELEGRAM, size=16, color=COLOR_PRIMARY),
-                            ft.Text(f"@{u}", size=14, expand=True, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.IconButton(ft.Icons.DELETE_ROUNDED, icon_color=COLOR_DANGER, icon_size=20, 
-                                          on_click=lambda e, x=u: remove_ch(x))
-                        ]),
-                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                        bgcolor=get_opacity_color(COLOR_BG, 0.5),
-                        border_radius=8
-                    )
-                )
-            page.update()
-
-        def add_ch(e):
-            val = tf_add.value.strip().replace("@", "")
-            if val and val not in channels:
-                # Add new channel structure
-                channels[val] = {"slug": val} 
-                # SAVE TO FILE
-                save_channels(channels)
-                
-                tf_add.value = ""
-                refresh_list()
-
-        def remove_ch(u):
-            if u in channels:
-                # Remove channel
-                del channels[u]
-                # SAVE TO FILE
-                save_channels(channels)
-                
-                refresh_list()
-
-        refresh_list()
-        
-        dlg = ft.AlertDialog(
-            title=ft.Text("Manage Channels", weight="bold"),
-            content=ft.Container(
-                content=ft.Column([
-                    ft.Row([tf_add, ft.IconButton(ft.Icons.ADD_CIRCLE_ROUNDED, icon_color=COLOR_SECONDARY, icon_size=30, on_click=add_ch)]),
-                    ft.Divider(),
-                    lv_channels
-                ], tight=True, width=300),
-                padding=0
-            ),
-            actions=[ft.TextButton("Close", on_click=lambda e: page.close(dlg))],
-            bgcolor=COLOR_SURFACE
-        )
-        page.open(dlg)
-
-    def open_tools_dialog(e):
-        """Dialog to manually trigger tool download."""
-        
-        status_text = "Installed" if os.path.exists(XRAY_KNIFE_PATH) else "Missing"
-        status_color = COLOR_SECONDARY if os.path.exists(XRAY_KNIFE_PATH) else COLOR_DANGER
-        
-        def start_download(e):
-            page.close(dlg)
-            btn_run.disabled = True
-            btn_run.text = "Downloading Tools..."
-            page.update()
-            
-            def on_finish():
-                btn_run.disabled = False
-                btn_run.text = "Run Extraction"
-                page.update()
-                page.open(ft.SnackBar(ft.Text("Tool Downloaded!"), bgcolor=COLOR_SECONDARY))
-
-            threading.Thread(target=download_xray_task, args=(on_finish,), daemon=True).start()
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Tools Manager", weight="bold"),
-            content=ft.Column([
-                ft.Row([ft.Text("Xray-Knife Status:"), ft.Text(status_text, color=status_color, weight="bold")]),
-                ft.Text("Required for speed testing and filtering configs.", size=12, color=COLOR_TEXT_DIM),
-            ], tight=True, width=300),
-            actions=[
-                ft.TextButton("Close", on_click=lambda e: page.close(dlg)),
-                ft.ElevatedButton("Download / Update", on_click=start_download, bgcolor=COLOR_SURFACE)
-            ],
-            bgcolor=COLOR_SURFACE
-        )
-        page.open(dlg)
-
-    # --- Main Logic & Threads ---
-
-    def update_progress(val):
-        prog_bar.value = val
-        page.update()
-
-    def start_process_flow(e):
-        if is_processing: return
-        
-        # Check Tool Existence first
+    def run_process(e):
         if not os.path.exists(XRAY_KNIFE_PATH):
-            def dl_and_run(e):
-                page.close(dlg_missing)
-                btn_run.disabled = True
-                btn_run.text = "Downloading Tool..."
-                page.update()
-                
-                def proceed():
-                    prompt_vpn_check()
+            bs_logs.open = True
+            bs_logs.update()
+            threading.Thread(target=download_tool, args=(run_vpn_check,), daemon=True).start()
+        else:
+            run_vpn_check()
 
-                threading.Thread(target=download_xray_task, args=(proceed,), daemon=True).start()
-
-            def skip_and_run(e):
-                page.close(dlg_missing)
-                prompt_vpn_check()
-
-            dlg_missing = ft.AlertDialog(
-                title=ft.Text("⚠️ Tool Missing"),
-                content=ft.Text("Xray-Knife is missing. Configs will NOT be tested for speed/validity without it."),
-                actions=[
-                    ft.TextButton("Skip Speedtest", on_click=skip_and_run),
-                    ft.ElevatedButton("Download & Run", on_click=dl_and_run, bgcolor=COLOR_PRIMARY, color="white")
-                ],
-                bgcolor=COLOR_SURFACE
-            )
-            page.open(dlg_missing)
-            return
-
-        prompt_vpn_check()
-
-    def stop_process(e):
-        proxy_processor.stop_processing()
-        btn_stop.disabled = True
-        btn_stop.text = "Stopping..."
-        page.update()
-
-    def prompt_vpn_check():
-        def start_stage_1(e):
-            page.close(dlg_vpn1)
-            
-            # Reset Backend Flags
-            proxy_processor.reset_globals()
-
-            # UI State for Running
-            btn_run.visible = False
-            btn_stop.visible = True
-            btn_stop.disabled = False
-            btn_stop.text = "Stop"
-            
-            prog_bar.value = None
+    def run_vpn_check():
+        def start(e):
+            page.close(dlg_vpn)
+            status_ring.value = None 
+            status_icon.name = ft.Icons.SYNC_ROUNDED
+            status_text.value = "Fetching..."
             page.update()
             
-            settings = load_settings()
+            proxy_processor.reset_globals()
+            settings = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
             proxy_processor.init_globals(settings)
             
             sys.stdout = logger
-            threading.Thread(target=run_stage_1_thread, daemon=True).start()
+            threading.Thread(target=stage_1_thread, daemon=True).start()
 
-        dlg_vpn1 = ft.AlertDialog(
-            title=ft.Text("⚠️ VPN Required"),
-            content=ft.Text("Telegram is blocked in your region.\nPlease ENABLE your VPN to fetch channel data."),
-            actions=[ft.ElevatedButton("I have Enabled VPN", on_click=start_stage_1, bgcolor=COLOR_PRIMARY, color="white")],
-            bgcolor=COLOR_SURFACE
+        dlg_vpn = ft.AlertDialog(
+            title=ft.Text("Enable VPN"), 
+            content=ft.Text("VPN is required to fetch Telegram channels."),
+            actions=[ft.ElevatedButton("I'm Connected", on_click=start)]
         )
-        page.open(dlg_vpn1)
+        page.open(dlg_vpn)
 
-    def run_stage_1_thread():
+    def stage_1_thread():
         try:
             proxy_processor.run_stage_1()
-            if proxy_processor.ABORT_FLAG:
-                sys.stdout.write("\n⚠️ Process stopped by user.\n")
-                reset_ui()
-            else:
-                show_stage_2_prompt()
-        except Exception as ex:
-            sys.stdout.write(f"Critical Error Stage 1: {ex}\n")
-            reset_ui()
+            if proxy_processor.ABORT_FLAG: finish_ui(False)
+            else: show_stage_2_confirm()
+        except: finish_ui(False)
 
-    def show_stage_2_prompt():
-        def start_stage_2(e):
-            page.close(dlg_vpn2)
-            prog_bar.value = 0
+    def show_stage_2_confirm():
+        def go(e):
+            page.close(dlg_s2)
+            status_text.value = "Processing..."
             page.update()
-            
-            settings = load_settings()
-            threading.Thread(
-                target=run_stage_2_thread, 
-                args=(settings['enable_converters'],), 
-                daemon=True
-            ).start()
+            s = load_json(SETTINGS_FILE)
+            threading.Thread(target=stage_2_thread, args=(s.get('enable_converters', True),), daemon=True).start()
 
-        dlg_vpn2 = ft.AlertDialog(
-            title=ft.Text("✅ Fetch Complete"),
-            content=ft.Text("Data cached successfully.\nYou may now DISABLE your VPN for faster local processing (Optional)."),
-            actions=[ft.ElevatedButton("Start Processing", on_click=start_stage_2, bgcolor=COLOR_SECONDARY, color=COLOR_BG)],
-            bgcolor=COLOR_SURFACE
+        dlg_s2 = ft.AlertDialog(
+            title=ft.Text("Fetch Done"), 
+            content=ft.Text("Disable VPN now for accurate speedtest?"),
+            actions=[ft.TextButton("Continue", on_click=go)]
         )
-        page.open(dlg_vpn2)
+        page.open(dlg_s2)
 
-    def run_stage_2_thread(do_convert):
+    def stage_2_thread(conv):
         try:
-            proxy_processor.run_stage_2_5(cb=update_progress, convert=do_convert)
-            if proxy_processor.ABORT_FLAG:
-                sys.stdout.write("\n⚠️ Process stopped by user.\n")
-            else:
-                sys.stdout.write("\nProcess Finished Successfully.\n")
-                refresh_stats_ui()
-            
-        except Exception as ex:
-            sys.stdout.write(f"Critical Error Stage 2: {ex}\n")
-        finally:
-            reset_ui()
+            proxy_processor.run_stage_2_5(convert=conv)
+            finish_ui(True)
+        except: finish_ui(False)
 
-    def refresh_stats_ui():
-        load_stats()
-
-    def reset_ui():
-        btn_run.visible = True
-        btn_run.disabled = False
-        btn_run.text = "Run Extraction"
-        
-        btn_stop.visible = False
-        
-        prog_bar.value = 0
+    def finish_ui(success):
+        status_ring.value = 0
+        status_icon.name = ft.Icons.CHECK_CIRCLE if success else ft.Icons.ERROR
+        status_icon.color = "green" if success else "red"
+        status_text.value = "Done" if success else "Stopped"
+        if success: load_stats()
         page.update()
 
-    # --- UI Layout Components ---
+    def stop_click(e):
+        proxy_processor.stop_processing()
+        status_text.value = "Stopping..."
+        page.update()
 
-    header = ft.Container(
-        content=ft.Row([
-            ft.Icon(ft.Icons.SECURITY, size=24, color=COLOR_PRIMARY),
-            ft.Text("PSG Station", size=20, weight="bold", color=COLOR_TEXT),
-            ft.Container(expand=True),
-            ft.Container(
-                content=ft.Row([ft.Icon(ft.Icons.CIRCLE, size=8, color="#55E6C1"), ft.Text("Ready", size=10)]),
-                bgcolor=COLOR_SURFACE, padding=ft.padding.symmetric(horizontal=8, vertical=4), border_radius=20
-            )
-        ]),
-        padding=15, bgcolor=COLOR_BG
-    )
+    # ==========================
+    # 📱 PAGES (VIEWS)
+    # ==========================
 
-    sidebar = ft.Container(
-        content=ft.Column([
-            ft.IconButton(ft.Icons.DASHBOARD_ROUNDED, icon_color=COLOR_PRIMARY, tooltip="Dashboard"),
-            ft.IconButton(ft.Icons.LIST_ROUNDED, icon_color=COLOR_TEXT_DIM, tooltip="Channels", on_click=open_channel_manager),
-            ft.IconButton(ft.Icons.SETTINGS_ROUNDED, icon_color=COLOR_TEXT_DIM, tooltip="Settings", on_click=open_settings),
-            ft.IconButton(ft.Icons.BUILD_CIRCLE_ROUNDED, icon_color=COLOR_TEXT_DIM, tooltip="Tools", on_click=open_tools_dialog),
-            ft.IconButton(ft.Icons.FOLDER_OPEN_ROUNDED, icon_color=COLOR_TEXT_DIM, tooltip="Open Output", 
-                          on_click=lambda e: os.startfile(os.getcwd()) if IS_WINDOWS else None),
-        ], spacing=10),
-        width=50, bgcolor=COLOR_SURFACE, padding=ft.padding.only(top=20), alignment=ft.alignment.top_center,
-        border_radius=ft.border_radius.only(top_right=BORDER_RADIUS, bottom_right=BORDER_RADIUS)
-    )
-
-    def make_card(label, icon, color):
-        return ft.Container(
-            content=ft.Column([
-                ft.Container(content=ft.Icon(icon, color=color, size=20), bgcolor=get_opacity_color(color, 0.15), padding=6, border_radius=8),
-                ft.Text("-", size=18, weight="bold", color="white"),
-                ft.Text(label, size=10, color=COLOR_TEXT_DIM)
-            ], spacing=2),
-            bgcolor=COLOR_SURFACE, padding=10, border_radius=BORDER_RADIUS, 
-            width=100, height=100
-        )
-
-    st_configs = make_card("Raw", ft.Icons.DATA_USAGE_ROUNDED, COLOR_PRIMARY)
-    st_countries = make_card("Locs", ft.Icons.PUBLIC_ROUNDED, COLOR_SECONDARY)
-    st_sources = make_card("Src", ft.Icons.SOURCE_ROUNDED, "#FAB1A0")
-
-    def load_stats():
-        if os.path.exists(SUMMARY_FILE):
-            try:
-                with open(SUMMARY_FILE, 'r', encoding='utf-8') as f: d = json.load(f)
-                
-                total_raw = d.get('configs', {}).get('total_raw', 0)
-                total_countries = len(d.get('outputs', {}).get('country_distribution', {}))
-                valid_sources = d.get('sources', {}).get('valid', 0)
-
-                st_configs.content.controls[1].value = str(total_raw)
-                st_countries.content.controls[1].value = str(total_countries)
-                st_sources.content.controls[1].value = str(valid_sources)
-                page.update()
-            except Exception as e:
-                print(f"Stats Load Error: {e}")
-
-    # Stats Row - Scrollable for narrow view
-    stats_row = ft.Row([st_configs, st_countries, st_sources], spacing=10, scroll=ft.ScrollMode.HIDDEN)
-
-    log_list = ft.ListView(expand=True, spacing=2, auto_scroll=False)
-    logger = Logger(log_list)
-    log_container = ft.Container(
-        content=log_list,
-        bgcolor="#000000",
-        border_radius=BORDER_RADIUS,
-        padding=10,
-        expand=True,
-        border=ft.Border(top=ft.BorderSide(1,"#333"), bottom=ft.BorderSide(1,"#333"), left=ft.BorderSide(1,"#333"), right=ft.BorderSide(1,"#333"))
-    )
-
-    prog_bar = ft.ProgressBar(value=0, color=COLOR_PRIMARY, bgcolor=COLOR_SURFACE, height=4)
-    
-    # --- Action Buttons ---
-    btn_run = ft.ElevatedButton(
-        "Start", 
-        icon=ft.Icons.PLAY_ARROW_ROUNDED, 
-        on_click=start_process_flow,
-        expand=True,
-        style=ft.ButtonStyle(bgcolor=COLOR_PRIMARY, color="white", shape=ft.RoundedRectangleBorder(radius=10), padding=15)
-    )
-
-    btn_stop = ft.ElevatedButton(
-        "Stop", 
-        icon=ft.Icons.STOP_ROUNDED, 
-        visible=False,
-        on_click=stop_process,
-        expand=True,
-        style=ft.ButtonStyle(bgcolor=COLOR_DANGER, color="white", shape=ft.RoundedRectangleBorder(radius=10), padding=15)
-    )
-    
-    main_layout = ft.Container(
-        content=ft.Column([
-            header,
-            stats_row,
-            ft.Text("Logs", weight="bold", size=12, color=COLOR_TEXT_DIM),
-            log_container,
+    # --- 1. DASHBOARD ---
+    bs_logs = ft.BottomSheet(
+        ft.Container(
             ft.Column([
-                prog_bar,
-                ft.Row([btn_stop, btn_run], alignment=ft.MainAxisAlignment.CENTER)
-            ], spacing=10)
-        ], spacing=10, expand=True),
-        padding=15, expand=True
+                ft.Text("System Logs", weight="bold"),
+                ft.Container(log_lv, height=300, bgcolor="black", border_radius=8, padding=10),
+                ft.Button("Close", on_click=lambda e: page.close(bs_logs))
+            ], spacing=10),
+            padding=20, bgcolor=COLOR_CARD
+        )
     )
 
-    page.add(ft.Row([sidebar, main_layout], expand=True, spacing=0))
+    view_dashboard = ft.Container(
+        content=ft.Column([
+            ft.Container(height=20),
+            ft.Stack([
+                ft.Container(content=status_ring, alignment=ft.alignment.center),
+                ft.Container(content=status_icon, alignment=ft.alignment.center, padding=35),
+            ], height=130),
+            ft.Container(content=status_text, alignment=ft.alignment.center),
+            ft.Container(height=20),
+            ft.Row([st_raw, st_loc, st_src], spacing=10),
+            ft.Container(height=20),
+            ft.Row([
+                ft.ElevatedButton("Show Logs", icon=ft.Icons.TERMINAL, on_click=lambda e: page.open(bs_logs),
+                                  style=ft.ButtonStyle(bgcolor=COLOR_CARD, color="white", padding=20), expand=True),
+                ft.ElevatedButton("Stop", icon=ft.Icons.STOP, on_click=stop_click,
+                                  style=ft.ButtonStyle(bgcolor=COLOR_ERROR, color="white", padding=20), expand=True),
+            ]),
+            ft.Container(expand=True),
+            ft.ElevatedButton("START", on_click=run_process, 
+                              style=ft.ButtonStyle(bgcolor=COLOR_PRIMARY, color="black", shape=ft.RoundedRectangleBorder(radius=12)),
+                              width=200, height=50)
+        ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=20,
+        expand=True
+    )
+
+    # --- 2. CHANNELS (Fixed: Search & Checkboxes) ---
+    lv_chan = ft.ListView(expand=True, spacing=5)
+    tf_chan_add = ft.TextField(hint_text="Add (no @)", expand=True, border_color=COLOR_PRIMARY)
+    tf_chan_search = ft.TextField(hint_text="Search...", prefix_icon=ft.Icons.SEARCH, expand=True)
+    
+    def refresh_channels(filter_text=""):
+        data = load_json(USER_ASSETS_FILE)
+        lv_chan.controls.clear()
+        
+        sorted_keys = sorted(data.keys())
+        
+        for u in sorted_keys:
+            if filter_text.lower() in u.lower():
+                is_enabled = data[u].get("enabled", True)
+                
+                # Checkbox toggles 'enabled'
+                cb = ft.Checkbox(
+                    label=u, 
+                    value=is_enabled, 
+                    on_change=lambda e, x=u: toggle_chan(x, e.control.value)
+                )
+                
+                lv_chan.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            cb,
+                            ft.Container(expand=True),
+                            # Delete entirely
+                            ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color=COLOR_DIM, on_click=lambda e,x=u: del_chan(x))
+                        ]),
+                        bgcolor=COLOR_CARD, padding=ft.padding.symmetric(horizontal=10), border_radius=8
+                    )
+                )
+        page.update()
+
+    def toggle_chan(x, val):
+        data = load_json(USER_ASSETS_FILE)
+        if x in data:
+            data[x]['enabled'] = val
+            save_json(USER_ASSETS_FILE, data)
+
+    def add_chan(e):
+        if not tf_chan_add.value: return
+        data = load_json(USER_ASSETS_FILE)
+        # Default enabled = True
+        data[tf_chan_add.value] = {"slug": tf_chan_add.value, "enabled": True}
+        save_json(USER_ASSETS_FILE, data)
+        tf_chan_add.value = ""
+        refresh_channels(tf_chan_search.value)
+
+    def del_chan(x):
+        data = load_json(USER_ASSETS_FILE)
+        if x in data: del data[x]
+        save_json(USER_ASSETS_FILE, data)
+        refresh_channels(tf_chan_search.value)
+
+    # Search Listener
+    tf_chan_search.on_change = lambda e: refresh_channels(e.control.value)
+
+    view_channels = ft.Container(
+        content=ft.Column([
+            ft.Text("Manage Channels", size=20, weight="bold"),
+            ft.Row([tf_chan_add, ft.IconButton(ft.Icons.ADD_CIRCLE, icon_color=COLOR_PRIMARY, icon_size=40, on_click=add_chan)]),
+            tf_chan_search,
+            lv_chan
+        ], expand=True),
+        padding=20,
+        expand=True
+    )
+
+    # --- 3. FILES (Fixed: Export/Save) ---
+    lv_files = ft.ListView(expand=True)
+    
+    def refresh_files():
+        lv_files.controls.clear()
+        subs_dir = os.path.join(WORK_DIR, "subscriptions", "xray", "normal")
+        
+        if not os.path.exists(subs_dir):
+            lv_files.controls.append(ft.Text("No files generated yet.", color=COLOR_DIM))
+        else:
+            for f in os.listdir(subs_dir):
+                path = os.path.join(subs_dir, f)
+                lv_files.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.INSERT_DRIVE_FILE, color=COLOR_PRIMARY),
+                            ft.Column([
+                                ft.Text(f, weight="bold"),
+                                ft.Text(f"{os.path.getsize(path)/1024:.1f} KB", size=10, color=COLOR_DIM)
+                            ], expand=True),
+                            # Export Button
+                            ft.IconButton(ft.Icons.DOWNLOAD_ROUNDED, tooltip="Save to Device", on_click=lambda e,p=path: trigger_export(p))
+                        ]),
+                        bgcolor=COLOR_CARD, padding=10, border_radius=8
+                    )
+                )
+        lv_files.controls.insert(0, ft.Container(
+            content=ft.Text(f"Internal Storage: {WORK_DIR}", size=10, color="grey"),
+            padding=10
+        ))
+        page.update()
+
+    view_files = ft.Container(
+        content=ft.Column([
+            ft.Text("Output Files", size=20, weight="bold"),
+            ft.Text("Click download icon to save files", size=12, color=COLOR_DIM),
+            lv_files,
+            ft.ElevatedButton("Refresh", on_click=lambda e: refresh_files())
+        ], expand=True),
+        padding=20,
+        expand=True
+    )
+
+    # --- 4. SETTINGS ---
+    def load_settings_ui():
+        d = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        tf_brand.value = d['branding_name']
+        tf_max.value = str(d['max_per_channel'])
+        sw_conv.value = d['enable_converters']
+        page.update()
+
+    def save_settings_ui(e):
+        d = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        d['branding_name'] = tf_brand.value
+        d['max_per_channel'] = int(tf_max.value)
+        d['enable_converters'] = sw_conv.value
+        save_json(SETTINGS_FILE, d)
+        page.open(ft.SnackBar(ft.Text("Settings Saved")))
+
+    tf_brand = ft.TextField(label="Branding Name")
+    tf_max = ft.TextField(label="Max per Channel", keyboard_type="number")
+    sw_conv = ft.Switch(label="Enable Converters (Singbox/Clash)")
+    
+    view_settings = ft.Container(
+        content=ft.Column([
+            ft.Text("Configuration", size=20, weight="bold"),
+            tf_brand, tf_max, sw_conv,
+            ft.ElevatedButton("Save Changes", on_click=save_settings_ui, bgcolor=COLOR_PRIMARY, color="black")
+        ], expand=True),
+        padding=20,
+        expand=True
+    )
+
+    # ==========================
+    # 🧭 NAVIGATION
+    # ==========================
+    
+    def on_nav_change(e):
+        idx = e.control.selected_index
+        main_container = page.controls[0].controls[0]
+        
+        if idx == 0: main_container.content = view_dashboard
+        elif idx == 1: refresh_channels(); main_container.content = view_channels
+        elif idx == 2: refresh_files(); main_container.content = view_files
+        elif idx == 3: load_settings_ui(); main_container.content = view_settings
+        page.update()
+
+    nav_bar = ft.NavigationBar(
+        selected_index=0,
+        on_change=on_nav_change,
+        bgcolor=COLOR_CARD,
+        destinations=[
+            ft.NavigationBarDestination(icon=ft.Icons.DASHBOARD_ROUNDED, label="Home"),
+            ft.NavigationBarDestination(icon=ft.Icons.LIST_ALT_ROUNDED, label="Channels"),
+            ft.NavigationBarDestination(icon=ft.Icons.FOLDER_ROUNDED, label="Files"),
+            ft.NavigationBarDestination(icon=ft.Icons.SETTINGS_ROUNDED, label="Settings"),
+        ]
+    )
+
+    page.add(ft.Column([
+        ft.Container(content=view_dashboard, expand=True), 
+        nav_bar
+    ], expand=True))
+    
     load_stats()
 
 if __name__ == "__main__":

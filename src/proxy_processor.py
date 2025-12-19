@@ -40,34 +40,32 @@ def stop_processing():
             print("Killed speedtest process.")
         except: pass
 
-# --- Configuration (MERGED FIX) ---
+# --- Configuration (FLET BUILD COMPATIBLE) ---
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    if platform.system() != "Windows":
-        return os.path.expanduser("~")
+    if "ANDROID_ARGUMENT" in os.environ:
+        path = os.path.join(os.environ.get("HOME", "/data/data/com.psgstation/files"), "psg_data")
+        if not os.path.exists(path): 
+            try: os.makedirs(path)
+            except: pass
+        return path
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.getcwd()
 
 WORK_DIR = get_work_dir()
 
-# 1. Assets Logic (Priority: User File > Bundled File)
-USER_CHANNELS_DIR = os.path.join(WORK_DIR, "channelsData")
-USER_ASSETS_FILE = os.path.join(USER_CHANNELS_DIR, "channelsAssets.json")
-BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
+# READ-ONLY PATHS
+ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
+USER_CHANNELS = os.path.join(WORK_DIR, "channelsData", "channelsAssets.json")
+if os.path.exists(USER_CHANNELS):
+    ASSETS_FILE = USER_CHANNELS
 
-# Logic: If user has their own file, use it. Otherwise read the internal one.
-if os.path.exists(USER_ASSETS_FILE):
-    ASSETS_FILE = USER_ASSETS_FILE
-else:
-    ASSETS_FILE = BUNDLED_ASSETS_FILE
-
-# 2. Other Read-Only Assets
 TEMPLATES_DIR = os.path.join(INTERNAL_DIR, "templates")
 MMDB_FILE = os.path.join(INTERNAL_DIR, "channelsData", "GeoLite2-Country.mmdb")
 
-# 3. Writeable Paths (Persistent)
+# WRITEABLE PATHS
 OUTPUT_DIR = os.path.join(WORK_DIR, "subscriptions")
 LOCATION_DIR = os.path.join(OUTPUT_DIR, "location")
 CHANNEL_SUBS_DIR = os.path.join(OUTPUT_DIR, "channel")
@@ -388,6 +386,11 @@ class Stage1_Fetcher:
     def fetch_url(self, item) -> tuple[str, str, bool]:
         if ABORT_FLAG: return item[0], "", False
         source_name, source_data = item
+        
+        # --- NEW: SKIP DISABLED CHANNELS ---
+        if not source_data.get("enabled", True):
+            return source_name, "", False
+        
         if "subscription_url" in source_data:
             print(f"  Downloading subscription: {source_name}")
             try:
@@ -418,7 +421,7 @@ class Stage1_Fetcher:
             if success and content:
                 with open(os.path.join(HTML_CACHE_DIR, f"{source}.html"), 'w', encoding='utf-8') as f: f.write(content)
                 success_count += 1
-        print(f"Fetched {success_count}/{len(assets)} sources successfully.")
+        print(f"Fetched {success_count} sources successfully.")
 
 class Stage2_Extractor:
     def __init__(self):
@@ -458,6 +461,10 @@ class Stage2_Extractor:
         configs_list = {}
         for source, data in assets.items():
             if ABORT_FLAG: return
+            
+            # Skip disabled in Stage 2 as well, just in case old cache exists
+            if not data.get("enabled", True): continue
+
             html_path = os.path.join(HTML_CACHE_DIR, f"{source}.html")
             if os.path.exists(html_path):
                 with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -635,13 +642,16 @@ class Stage3_5_Speedtest:
                 
                 print(f"✅ Speedtest Complete. Active Configs: {len(valid_configs)}")
                 
-                # Overwrite the main file so API sync works
+                # 1. Overwrite Main Config
                 with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
                     f.write(valid_data)
                 
+                # 2. Update Mix File
+                self._update_mix_file(valid_configs)
+
+                # 3. Update API File
                 self._sync_api_file()
                 
-                # RETURN THE LIST IN MEMORY
                 return valid_configs
             else:
                 print("⚠️ Speedtest found NO valid configs or failed. Keeping original list.")
@@ -651,6 +661,19 @@ class Stage3_5_Speedtest:
             if not ABORT_FLAG:
                 print(f"❌ Error executing speedtest: {e}")
             return None
+
+    def _update_mix_file(self, configs):
+        mix_dir = os.path.join(SUBS_XRAY_DIR, 'normal')
+        mix_dir_b64 = os.path.join(SUBS_XRAY_DIR, 'base64')
+        
+        b64_title = base64.b64encode(f"{GlobalConfig.BRANDING} | MIX".encode()).decode()
+        header = f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n#support-url: https://t.me/yebekhe\n\n"
+        content = header + "\n".join(configs)
+        
+        if os.path.exists(mix_dir):
+            with open(os.path.join(mix_dir, "mix"), 'w', encoding='utf-8') as f: f.write(content)
+        if os.path.exists(mix_dir_b64):
+            with open(os.path.join(mix_dir_b64, "mix"), 'w', encoding='utf-8') as f: f.write(base64.b64encode(content.encode()).decode())
 
     def _sync_api_file(self):
         if not os.path.exists(API_OUTPUT_FILE) or not os.path.exists(FINAL_CONFIG_FILE): return
@@ -681,12 +704,11 @@ class Stage4_Sorter:
             return 'ipv4' if ip.version == 4 else 'ipv6'
         except: return 'domain'
 
-    # MODIFIED: Accepts config_list explicitly
     def run(self, config_list=None):
         print("\n--- STAGE 4: SORTING & FAKES ---")
         if ABORT_FLAG: return
         
-        # If list passed from Speedtest, use it. Otherwise read file.
+        # Use filtered list if available
         if config_list and len(config_list) > 0:
             lines = config_list
         elif os.path.exists(FINAL_CONFIG_FILE):
@@ -727,7 +749,7 @@ class Stage4_Sorter:
 
     def _hiddify_header(self, title):
         b64_title = base64.b64encode(title.encode()).decode()
-        return f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n\n"
+        return f"#profile-title: base64:{b64_title}\n#profile-update-interval: 1\n#support-url: https://t.me/yebekhe\n\n"
 
 class Stage5_Converters:
     def run(self, progress_callback=None):
