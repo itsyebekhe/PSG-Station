@@ -120,7 +120,7 @@ jobs:
         env:
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flet build apk --split-per-abi --verbose
+        run: flet build apk --split-per-abi --build-number ${{ github.run_number }} --verbose
 
       # Upload ALL generated APKs
       - name: Upload Artifact
