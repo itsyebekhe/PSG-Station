@@ -4,7 +4,10 @@ import threading
 import json
 import os
 import shutil
+import zipfile
+import stat
 import requests
+import platform
 import proxy_processor
 
 # ==========================================
@@ -36,6 +39,7 @@ XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 # --- THEME COLORS ---
 COLOR_BG_TOP = "#050505"
 COLOR_BG_BOT = "#121214"
+COLOR_SURFACE = "#18181B" 
 COLOR_CARD = "#1E1E22"
 COLOR_BORDER = "#2A2A30"
 COLOR_PRIMARY = "#7C3AED"
@@ -222,24 +226,71 @@ def main(page: ft.Page):
             logger.write(f"Error: {e}")
             finish_ui(False) # <--- Direct call
 
+    # --- Helper to download the tool ---
+    def download_tool(on_done=None):
+        try:
+            target, err = proxy_processor.get_target_asset_name() # Ensure this exists in your backend
+            if err: return logger.write(f"Error: {err}")
+            
+            logger.write(f"Downloading {target}...")
+            url = f"https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest"
+            assets = requests.get(url).json().get("assets", [])
+            dl_url = next((x["browser_download_url"] for x in assets if x["name"] == target), None)
+            
+            if not dl_url: return logger.write("Asset not found.")
+            
+            zip_path = os.path.join(WORK_DIR, "tool.zip")
+            with requests.get(dl_url, stream=True) as r:
+                with open(zip_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
+            
+            with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
+            
+            if sys.platform != "win32":
+                os.chmod(XRAY_KNIFE_PATH, 0o777)
+            os.remove(zip_path)
+            logger.write("✅ Tool Ready.")
+            if on_done: on_done()
+        except Exception as e:
+            logger.write(f"Download Error: {e}")
+
+    # --- Updated Action Click with Tool Check ---
     def on_action_click(e):
         if btn_action.text == "START":
+            # CHECK IF TOOL EXISTS
+            if not os.path.exists(XRAY_KNIFE_PATH):
+                def start_dl(e):
+                    page.close(dlg_missing)
+                    btn_action.disabled = True
+                    btn_action.text = "Downloading..."
+                    page.update()
+                    threading.Thread(target=download_tool, args=(lambda: on_action_click(None),), daemon=True).start()
+
+                dlg_missing = ft.AlertDialog(
+                    title=ft.Text("Tool Missing"),
+                    content=ft.Text("Xray-Knife is required for speedtesting. Download now?"),
+                    actions=[
+                        ft.TextButton("Cancel", on_click=lambda e: page.close(dlg_missing)),
+                        ft.ElevatedButton("Download", on_click=start_dl)
+                    ], bgcolor=COLOR_SURFACE
+                )
+                page.open(dlg_missing)
+                return
+
+            # Proceed to Start if tool exists
             btn_action.text = "STOP"
             btn_action.icon = ft.Icons.STOP_ROUNDED
             btn_action.style.bgcolor = COLOR_ERROR
             status_text.value = "Working..."
-            status_sub.value = "Fetching from Telegram..."
             status_ring.value = None
             page.update()
             
             sys.stdout = logger
             proxy_processor.reset_globals()
             settings = load_json(SETTINGS_FILE)
-            settings = {**DEFAULT_SETTINGS, **settings}
-            proxy_processor.init_globals(settings)
-            
+            proxy_processor.init_globals({**DEFAULT_SETTINGS, **settings})
             threading.Thread(target=process_thread, daemon=True).start()
         else:
+            # STOP logic
             btn_action.disabled = True
             btn_action.text = "STOPPING..."
             page.update()
@@ -423,10 +474,17 @@ def main(page: ft.Page):
 
     def nav_change(e):
         idx = e.control.selected_index
-        if idx == 0: content_area.content = view_dashboard
-        elif idx == 1: refresh_chan(); content_area.content = view_channels
-        elif idx == 2: refresh_files(); content_area.content = view_files
-        elif idx == 3: load_settings_ui(); content_area.content = view_settings
+        if idx == 0: 
+            content_area.content = view_dashboard # REMOVED ()
+        elif idx == 1: 
+            refresh_chan()
+            content_area.content = view_channels  # REMOVED ()
+        elif idx == 2: 
+            refresh_files()
+            content_area.content = view_files     # REMOVED ()
+        elif idx == 3: 
+            load_settings_ui()
+            content_area.content = view_settings  # REMOVED ()
         page.update()
 
     nav_bar = ft.NavigationBar(
@@ -458,7 +516,24 @@ def main(page: ft.Page):
         ], spacing=0, expand=True)
     )
 
+    # Assemble Layout
+    # SAFE AREA now wraps the ENTIRE Column (Content + Nav) 
+    # to push the navbar above the system bottom bar.
+    layout = ft.SafeArea(
+        content=ft.Column([
+            content_area, 
+            nav_bar
+        ], spacing=0, expand=True),
+        expand=True,
+        bottom=True, # Explicitly protect bottom insets
+        maintain_bottom_view_padding=True
+    )
+
+    main_bg.content = layout
     page.add(main_bg)
+    
+    # Initialize content
+    content_area.content = view_dashboard 
     update_stats()
 
 if __name__ == "__main__":

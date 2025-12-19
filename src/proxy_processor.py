@@ -37,6 +37,20 @@ def stop_processing():
             CURRENT_SUBPROCESS.kill()
         except: pass
 
+def get_target_asset_name():
+    """Maps OS and Architecture to the specific Xray-knife release file."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "windows":
+        return "Xray-knife-windows-64.zip", None
+    elif system == "linux" or "android" in system:
+        if "aarch64" in machine or "arm64" in machine:
+            return "Xray-knife-linux-arm64-v8a.zip", None
+        return "Xray-knife-linux-64.zip", None
+    elif system == "darwin":
+        return "Xray-knife-macos-64.zip", None
+    return None, "Unsupported OS"
+
 # --- Configuration ---
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
