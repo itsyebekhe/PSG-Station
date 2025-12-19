@@ -43,21 +43,12 @@ def stop_processing():
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.getcwd()
 
-# 1. Channels: Look for external file first, fallback to internal
-USER_CHANNELS_DIR = os.path.join(WORK_DIR, "channelsData")
-USER_ASSETS_FILE = os.path.join(USER_CHANNELS_DIR, "channelsAssets.json")
-BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
-
-# Logic to pick the right file
-if os.path.exists(USER_ASSETS_FILE):
-    ASSETS_FILE = USER_ASSETS_FILE
-else:
-    ASSETS_FILE = BUNDLED_ASSETS_FILE
-
-# Other Paths
+# READ-ONLY PATHS
+ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 TEMPLATES_DIR = os.path.join(INTERNAL_DIR, "templates")
 MMDB_FILE = os.path.join(INTERNAL_DIR, "channelsData", "GeoLite2-Country.mmdb")
 
+# WRITEABLE PATHS
 OUTPUT_DIR = os.path.join(WORK_DIR, "subscriptions")
 LOCATION_DIR = os.path.join(OUTPUT_DIR, "location")
 CHANNEL_SUBS_DIR = os.path.join(OUTPUT_DIR, "channel")
@@ -226,7 +217,6 @@ class ProxyConverter:
     def to_singbox(data: dict) -> dict | None:
         ctype = data.get('protocol')
         if not ctype: return None
-        
         def get_tls(d, is_reality=False):
             sni = d['params'].get('sni') or d['hostname']
             tls = {"enabled": True, "server_name": sni, "insecure": True, "utls": {"enabled": True, "fingerprint": d['params'].get('fp', 'chrome')}}
@@ -238,7 +228,6 @@ class ProxyConverter:
             elif ttype == 'grpc': return {"type": "grpc", "service_name": d['params'].get('serviceName', '')}
             elif ttype == 'http': return {"type": "http", "host": [d['params'].get('host', d['hostname'])], "path": d['params'].get('path', '/')}
             return None
-
         if ctype == 'vmess':
             out = {"tag": data.get('ps', 'VMess'), "type": "vmess", "server": data.get('add'), "server_port": int(data.get('port')), "uuid": data.get('id'), "security": "auto", "alter_id": int(data.get('aid', 0))}
             if data.get('port') == 443 or data.get('tls') == 'tls': out['tls'] = {"enabled": True, "server_name": data.get('sni') or data.get('host') or data.get('add'), "insecure": True, "utls": {"enabled": True, "fingerprint": "chrome"}}
@@ -562,23 +551,21 @@ class Stage3_Deduplicator:
 class Stage3_5_Speedtest:
     def run(self, progress_callback=None):
         print("\n--- STAGE 3.5: SPEEDTEST FILTERING ---")
-        if ABORT_FLAG: return
+        if ABORT_FLAG: return None
         
         global CURRENT_SUBPROCESS
         is_windows = sys.platform == "win32"
         exe_name = "xray-knife.exe" if is_windows else "./xray-knife"
-        # We need to find xray-knife in WORK_DIR
         exe_path = os.path.join(WORK_DIR, exe_name)
 
         if not os.path.exists(exe_path):
-            print(f"⚠️ {exe_name} not found in {WORK_DIR}. Skipping speedtest.")
-            return
+            print(f"⚠️ {exe_name} not found. Skipping speedtest.")
+            return None
 
         if not os.path.exists(FINAL_CONFIG_FILE):
             print("No config file to test.")
-            return
+            return None
 
-        # Indeterminate progress
         if progress_callback: progress_callback(None)
 
         mdelay_ms = str(GlobalConfig.TIMEOUT * 1000)
@@ -596,6 +583,8 @@ class Stage3_5_Speedtest:
             "--thread", "20"
         ]
 
+        valid_configs = []
+
         try:
             CURRENT_SUBPROCESS = subprocess.Popen(
                 cmd, 
@@ -607,7 +596,6 @@ class Stage3_5_Speedtest:
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
 
-            # Read output line by line
             while True:
                 line = CURRENT_SUBPROCESS.stdout.readline()
                 if not line and CURRENT_SUBPROCESS.poll() is not None:
@@ -619,28 +607,31 @@ class Stage3_5_Speedtest:
 
             if ABORT_FLAG:
                 print("Speedtest Aborted.")
-                return
+                return None
 
             if os.path.exists(valid_output) and os.path.getsize(valid_output) > 0:
                 with open(valid_output, 'r', encoding='utf-8') as f:
                     valid_data = f.read()
-                    line_count = len(valid_data.splitlines())
+                    valid_configs = [l.strip() for l in valid_data.splitlines() if l.strip()]
                 
-                print(f"✅ Speedtest Complete. Active Configs: {line_count}")
+                print(f"✅ Speedtest Complete. Active Configs: {len(valid_configs)}")
                 
-                if os.path.exists(FINAL_CONFIG_FILE):
-                    os.remove(FINAL_CONFIG_FILE)
-                
+                # Overwrite the main file so API sync works
                 with open(FINAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
                     f.write(valid_data)
                 
                 self._sync_api_file()
+                
+                # RETURN THE LIST IN MEMORY
+                return valid_configs
             else:
                 print("⚠️ Speedtest found NO valid configs or failed. Keeping original list.")
+                return None
                 
         except Exception as e:
             if not ABORT_FLAG:
                 print(f"❌ Error executing speedtest: {e}")
+            return None
 
     def _sync_api_file(self):
         if not os.path.exists(API_OUTPUT_FILE) or not os.path.exists(FINAL_CONFIG_FILE): return
@@ -671,11 +662,18 @@ class Stage4_Sorter:
             return 'ipv4' if ip.version == 4 else 'ipv6'
         except: return 'domain'
 
-    def run(self):
+    # MODIFIED: Accepts config_list explicitly
+    def run(self, config_list=None):
         print("\n--- STAGE 4: SORTING & FAKES ---")
         if ABORT_FLAG: return
-        if not os.path.exists(FINAL_CONFIG_FILE): return
-        with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f: lines = [l.strip() for l in f if l.strip()]
+        
+        # If list passed from Speedtest, use it. Otherwise read file.
+        if config_list and len(config_list) > 0:
+            lines = config_list
+        elif os.path.exists(FINAL_CONFIG_FILE):
+            with open(FINAL_CONFIG_FILE, 'r', encoding='utf-8') as f: lines = [l.strip() for l in f if l.strip()]
+        else:
+            return
 
         sorted_confs = {}
         for conf in lines:
@@ -809,9 +807,13 @@ def run_stage_1():
 def run_stage_2_5(cb=None, convert=True):
     Stage2_Extractor().run(progress_callback=cb)
     Stage3_Deduplicator().run()
-    # Speedtest with kill capability
-    Stage3_5_Speedtest().run(progress_callback=cb)
-    Stage4_Sorter().run()
+    
+    # 3.5: Returns the filtered list
+    valid_list = Stage3_5_Speedtest().run(progress_callback=cb)
+    
+    # 4: Sorts ONLY the filtered list (or falls back if none)
+    Stage4_Sorter().run(config_list=valid_list)
+    
     if convert:
         Stage5_Converters().run(progress_callback=cb)
     else:
