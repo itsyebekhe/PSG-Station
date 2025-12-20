@@ -1,6 +1,6 @@
 [project]
 name = "psg_station"
-version = "1.1.5"
+version = "1.1.6"
 description = "Advanced Proxy Grabber & Speedtester"
 authors = [
     { name = "yebekhe", email = "yebekhe@proton.me" }
@@ -27,6 +27,7 @@ icon = "assets/icon.png"
 [tool.flet.android.signing]
 key_store = "upload-keystore.jks"
 key_alias = "upload"
+
 
 
 
