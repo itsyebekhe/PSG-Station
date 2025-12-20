@@ -17,32 +17,38 @@ import proxy_processor
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    # 1. Android Detection
-    if "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel') or os.path.exists("/system/build.prop"):
-        # Get the internal storage path from the environment
+    # 1. Check for Android environment variables
+    # 'HOME' is set by Termux and most Flet/Kivy loaders to the private internal files dir
+    # 'PYTHONPATH' or 'ANDROID_ARGUMENT' are common in APK environments
+    is_android = "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel')
+
+    if is_android:
+        # Try HOME first (standard for internal storage)
         path = os.environ.get("HOME")
         
-        # If HOME is missing or points to root, use your specific package path
-        if not path or path == "/":
-             path = "/data/data/com.yebekhe.psg_station/files"
+        # Fallback: Detect package name from the script path itself
+        # This turns /data/user/0/com.example.app/files/app/main.py -> /data/user/0/com.example.app/files
+        if not path or "/data/" not in path:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if "/data/" in script_dir:
+                # Split path and find the "files" or package directory
+                parts = script_dir.split('/')
+                if "files" in parts:
+                    idx = parts.index("files")
+                    path = "/".join(parts[:idx+1])
+                else:
+                    path = script_dir # Last resort fallback
         
         # Ensure the directory exists
-        if not os.path.exists(path):
-            try: 
-                os.makedirs(path, exist_ok=True)
-            except Exception as e: 
-                # If we can't create it, we are likely in a restricted environment. 
-                # Print error but return path anyway.
-                print(f"Error creating path: {e}")
-                pass
-            
-        return path
-    
-    # 2. PC (Frozen/Compiled)
+        if path:
+            os.makedirs(path, exist_ok=True)
+            return path
+
+    # 2. PC Frozen (Exe)
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     
-    # 3. PC (Script)
+    # 3. PC Script
     return os.getcwd()
 
 WORK_DIR = get_work_dir()
