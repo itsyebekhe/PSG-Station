@@ -8,45 +8,38 @@ import zipfile
 import stat
 import requests
 import platform
-import proxy_processor
 import pathlib
+import time
+import proxy_processor
 
 # ==========================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION & PATHS
 # ==========================================
 
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    # 1. Android Logic
-    if "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel'):
+    # 1. Try to get Flet's official storage path (Android/iOS)
+    flet_storage = os.getenv("FLET_APP_STORAGE_DATA")
+    
+    if flet_storage:
         try:
-            # Try to get the HOME variable (usually /data/user/0/com.package/files)
-            base = os.environ.get("HOME")
+            # CRITICAL: Resolve symlinks for Android 16 (fix execution permission errors)
+            # Converts /data/user/0/... -> /data_mirror/data_ce/...
+            real_path = str(pathlib.Path(flet_storage).resolve())
             
-            # If HOME isn't set, use the directory of the current script
-            if not base:
-                base = os.path.dirname(os.path.abspath(__file__))
-
-            # THE FIX: Resolve Symlinks
-            # This converts '/data/user/0/...' -> '/data_mirror/data_ce/null/0/...'
-            # This gives us the REAL physical path on the disk.
-            real_path = str(pathlib.Path(base).resolve())
+            # Use a subfolder to keep files organized
+            final_path = os.path.join(real_path, "psg_files")
             
-            # Create a dedicated folder for our binaries to keep things clean
-            bin_path = os.path.join(real_path, "psg_bin")
-            
-            if not os.path.exists(bin_path):
-                os.makedirs(bin_path, 0o777, exist_ok=True)
+            if not os.path.exists(final_path):
+                os.makedirs(final_path, 0o777, exist_ok=True)
                 
-            return bin_path
-
+            return final_path
         except Exception as e:
-            # Fallback if something goes wrong with resolve (permissions, etc)
             print(f"Path Resolution Error: {e}")
-            return os.path.dirname(os.path.abspath(__file__))
+            return flet_storage
 
-    # 2. PC Frozen
+    # 2. PC Frozen (Exe)
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     
@@ -54,14 +47,14 @@ def get_work_dir():
     return os.getcwd()
 
 WORK_DIR = get_work_dir()
-
-# Force correct binary filename
-XRAY_KNIFE_EXE = "xray-knife.exe" if sys.platform == "win32" else "xray-knife"
-XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 USER_ASSETS_FILE = os.path.join(WORK_DIR, "channelsData", "channelsAssets.json")
 BUNDLED_ASSETS_FILE = os.path.join(INTERNAL_DIR, "channelsData", "channelsAssets.json")
 SETTINGS_FILE = os.path.join(WORK_DIR, "settings.json")
 SUMMARY_FILE = os.path.join(WORK_DIR, "subscriptions", "summary.json")
+
+# Binary Name Logic
+XRAY_KNIFE_EXE = "xray-knife.exe" if sys.platform == "win32" else "xray-knife"
+XRAY_KNIFE_PATH = os.path.join(WORK_DIR, XRAY_KNIFE_EXE)
 
 # --- THEME COLORS ---
 COLOR_BG_TOP = "#050505"
@@ -107,6 +100,18 @@ class Logger:
 
     def flush(self): pass
 
+def load_json(p):
+    if os.path.exists(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_json(p, data):
+    try:
+        with open(p, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4)
+    except: pass
+
 def main(page: ft.Page):
     # --- Setup ---
     page.title = "PSG Station"
@@ -114,13 +119,10 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 0
     
-    # --- Responsive Window Logic ---
-    # On Android/iOS, 'page.window.width' is ignored (app fills screen).
-    # We only set defaults for Desktop OSs to look like a phone app.
     if page.platform in [ft.PagePlatform.WINDOWS, ft.PagePlatform.LINUX, ft.PagePlatform.MACOS]:
         page.window.width = 450
         page.window.height = 800
-        page.window.resizable = True # User can resize if they want
+        page.window.resizable = True
         page.window.min_width = 350
     
     # Init Files
@@ -131,14 +133,6 @@ def main(page: ft.Page):
     if not os.path.exists(USER_ASSETS_FILE):
         os.makedirs(os.path.dirname(USER_ASSETS_FILE), exist_ok=True)
         if os.path.exists(BUNDLED_ASSETS_FILE): shutil.copy(BUNDLED_ASSETS_FILE, USER_ASSETS_FILE)
-
-    def load_json(p):
-        if os.path.exists(p):
-            with open(p, 'r', encoding='utf-8') as f: return json.load(f)
-        return {}
-
-    def save_json(p, data):
-        with open(p, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4)
 
     # --- UI Helpers ---
     def ModernCard(content, padding=15):
@@ -179,10 +173,9 @@ def main(page: ft.Page):
     st_loc = ft.Text("-", size=24, weight="bold")
     st_src = ft.Text("-", size=24, weight="bold")
 
-    # 3. CHANNELS LIST (Updated)
+    # 3. CHANNELS LIST
     chan_lv = ft.ListView(expand=True, spacing=8)
     tf_add = ft.TextField(hint_text="Add Channel", expand=True, bgcolor=COLOR_CARD, border_color="transparent", height=45, border_radius=10, content_padding=10)
-    # Search & Count controls
     tf_search = ft.TextField(hint_text="Search...", prefix_icon=ft.Icons.SEARCH, bgcolor=COLOR_CARD, border_color="transparent", border_radius=10, height=40, content_padding=10)
     txt_chan_count = ft.Text("0 channels", size=12, color=COLOR_TEXT_DIM)
 
@@ -203,36 +196,31 @@ def main(page: ft.Page):
 
     def update_stats():
         try:
-            # 1. Paths
+            # 1. Manual File Count (Fixes "40" bug)
             mix_file = os.path.join(WORK_DIR, "subscriptions", "xray", "normal", "mix")
-            
-            # 2. Manual Count of the Mix file
             actual_count = 0
             if os.path.exists(mix_file):
-                with open(mix_file, 'r', encoding='utf-8') as f:
-                    # Only count lines that actually contain a config (vless, vmess, etc)
-                    actual_count = sum(1 for line in f if ":" in line)
+                try:
+                    with open(mix_file, 'r', encoding='utf-8') as f:
+                        # Count lines with config protocols
+                        actual_count = sum(1 for line in f if "://" in line)
+                except: pass
 
-            # 3. Load JSON and OVERWRITE the wrong data
+            # 2. Load JSON and Sync
             d = load_json(SUMMARY_FILE)
-            
-            # Force update the structure
             if "configs" not in d: d["configs"] = {}
             if "sources" not in d: d["sources"] = {"valid": 0}
             if "outputs" not in d: d["outputs"] = {"country_distribution": {}}
             
+            # Force update JSON
             d["configs"]["total_raw"] = actual_count
-            
-            # 4. Save the corrected JSON back to disk
             save_json(SUMMARY_FILE, d)
 
-            # 5. Update UI
+            # 3. Update UI
             st_raw.value = str(actual_count)
             st_src.value = str(d["sources"].get("valid", "0"))
-            
-            # Update Country Count (if stage 2 ran)
             countries = d["outputs"].get("country_distribution", {})
-            st_loc.value = str(len(countries)) if countries else "0"
+            st_loc.value = str(len(countries))
             
         except Exception as e:
             logger.write(f"Stats Error: {e}")
@@ -243,20 +231,26 @@ def main(page: ft.Page):
         status_ring.value = 0
         status_text.value = "Completed" if success else "Stopped"
         status_sub.value = "Check Output Files" if success else "Process Aborted"
-        btn_action.text = "START"
-        btn_action.icon = ft.Icons.PLAY_ARROW_ROUNDED
-        btn_action.style.bgcolor = COLOR_PRIMARY
-        btn_action.disabled = False
         
-        # This will now count the file and fix the JSON
-        update_stats()
+        # Reset Button State
+        btn_content.text = "START"
+        btn_content.icon = ft.Icons.PLAY_ARROW_ROUNDED
+        btn_content.style.bgcolor = COLOR_PRIMARY
+        btn_content.disabled = False
+        
+        if success:
+            time.sleep(0.5) # Wait for IO
+            update_stats()
         page.update()
 
     def process_thread():
         try:
+            # Use WORK_DIR for the processor
+            os.chdir(WORK_DIR) 
+            
             proxy_processor.run_stage_1()
             if proxy_processor.ABORT_FLAG:
-                finish_ui(False) # <--- Direct call
+                finish_ui(False)
                 return
 
             def start_s2(e):
@@ -275,129 +269,102 @@ def main(page: ft.Page):
             page.open(dlg_s2)
         except Exception as e:
             logger.write(f"Error: {e}")
-            finish_ui(False) # <--- Direct call
+            finish_ui(False)
 
     def stage_2_logic():
         try:
             s = load_json(SETTINGS_FILE)
             proxy_processor.run_stage_2_5(cb=None, convert=s.get('enable_converters', True))
-            finish_ui(True) # <--- Direct call
+            finish_ui(True)
         except Exception as e:
             logger.write(f"Error: {e}")
-            finish_ui(False) # <--- Direct call
+            finish_ui(False)
 
-    # --- Helper to download the tool ---
+    # --- Tool Downloader (Android Fixed) ---
     def download_tool(on_done=None):
         try:
-            logger.write(f"📂 Work Dir: {WORK_DIR}")
+            logger.write(f"📂 Storage: {WORK_DIR}")
             
-            # --- 1. DETERMINE TARGET FILE ---
-            target_asset = ""
-            is_android = "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel') or os.path.exists("/system/build.prop")
+            # 1. Determine Asset
+            target_asset = None
+            is_android = "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel')
             
             if is_android:
-                # Force the specific file you mentioned
-                target_asset = "Xray-knife-android-arm64-v8a.zip"
+                target_asset = "Xray-knife-android-arm64-v8a.zip" # Force Arm64
             else:
-                # Keep PC logic for Windows/Linux
-                target_asset, err = proxy_processor.get_target_asset_name()
-                if err: 
-                    logger.write(f"Error: {err}")
-                    finish_ui(False)
-                    return
+                target_asset, _ = proxy_processor.get_target_asset_name()
 
-            logger.write(f"⬇️ Downloading: {target_asset}")
+            logger.write(f"⬇️ Target: {target_asset}")
             
-            # --- 2. DOWNLOAD FROM GITHUB ---
-            headers = {"User-Agent": "Mozilla/5.0"} # Required to avoid 403 Forbidden
+            # 2. Download (with Headers)
+            headers = {"User-Agent": "Mozilla/5.0"} 
             url = "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest"
             
             resp = requests.get(url, headers=headers, timeout=10)
-            if resp.status_code != 200:
-                logger.write(f"❌ GitHub API Error: {resp.status_code}")
-                finish_ui(False)
-                return
-
             assets = resp.json().get("assets", [])
             dl_url = next((x["browser_download_url"] for x in assets if x["name"] == target_asset), None)
             
             if not dl_url:
-                logger.write(f"❌ File not found in release: {target_asset}")
+                logger.write("❌ Asset not found.")
                 finish_ui(False)
                 return
-            
-            zip_path = os.path.join(WORK_DIR, "tool.zip")
+
+            zip_path = os.path.join(WORK_DIR, "temp_tool.zip")
             with requests.get(dl_url, stream=True, headers=headers) as r:
                 r.raise_for_status()
                 with open(zip_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
-            
-            # --- 3. EXTRACT AND FIX PERMISSIONS ---
-            logger.write("📦 Extracting...")
-            try:
-                with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
-            except zipfile.BadZipFile:
-                logger.write("❌ Error: Downloaded file is corrupt.")
-                finish_ui(False)
-                return
 
-            os.remove(zip_path) # Clean up
+            # 3. Extract & Move
+            with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(WORK_DIR)
+            os.remove(zip_path)
 
-            # Find the binary (it might be in a subfolder or named differently)
-            binary_found = False
+            # Find binary recursively and move to root
+            found = False
             for root, dirs, files in os.walk(WORK_DIR):
                 for file in files:
-                    # On Android/Linux it's just 'xray-knife', on Win it's 'xray-knife.exe'
-                    if file == "xray-knife" or file == "xray-knife.exe":
-                        full_path = os.path.join(root, file)
-                        # Move it to the main path if it isn't there already
-                        if full_path != XRAY_KNIFE_PATH:
+                    if file in ["xray-knife", "xray-knife.exe"]:
+                        full_p = os.path.join(root, file)
+                        if full_p != XRAY_KNIFE_PATH:
                             if os.path.exists(XRAY_KNIFE_PATH): os.remove(XRAY_KNIFE_PATH)
-                            shutil.move(full_path, XRAY_KNIFE_PATH)
-                        binary_found = True
+                            shutil.move(full_p, XRAY_KNIFE_PATH)
+                        found = True
                         break
-                if binary_found: break
-            
-            if not binary_found:
-                logger.write("❌ Binary not found inside Zip.")
-                finish_ui(False)
-                return
+                if found: break
 
-            # CRITICAL: Make it executable
+            # 4. EXECUTION PERMISSIONS (Critical for Android)
             if sys.platform != "win32":
-                logger.write("🔑 Setting executable permissions...")
+                logger.write("🔑 Setting Permissions...")
                 os.chmod(XRAY_KNIFE_PATH, 0o777)
 
             logger.write("✅ Tool Ready.")
             if on_done: on_done()
 
         except Exception as e:
-            logger.write(f"❌ Crash: {e}")
+            logger.write(f"Download Error: {e}")
             finish_ui(False)
 
-    # --- Updated Action Click with Tool Check ---
+    # --- Actions ---
     def on_action_click(e):
-        # Allow click if text is START OR if it's currently downloading
-        if btn_action.text in ["START", "Downloading..."]:
+        if btn_content.text in ["START", "Downloading..."]:
             
-            # 1. Check if tool exists
+            # Check Tool
             if not os.path.exists(XRAY_KNIFE_PATH):
                 def start_dl(e):
                     page.close(dlg_missing)
-                    btn_action.disabled = True
-                    btn_action.text = "Downloading..." # Set state
+                    btn_content.disabled = True
+                    btn_content.text = "Downloading..."
                     page.update()
                     
-                    # Callback to restart this function after download
                     def after_dl():
-                        btn_action.text = "START" 
-                        btn_action.disabled = False
-                        on_action_click(None) # Auto-click start
+                        btn_content.text = "START" 
+                        btn_content.disabled = False
+                        on_action_click(None) # Auto-click
 
                     threading.Thread(target=download_tool, args=(after_dl,), daemon=True).start()
 
                 dlg_missing = ft.AlertDialog(
                     title=ft.Text("Tool Missing"),
-                    content=ft.Text("Downloading Xray-Knife? This may take a while."),
+                    content=ft.Text("Downloading Xray-Knife core..."),
                     actions=[
                         ft.TextButton("Cancel", on_click=lambda e: page.close(dlg_missing)),
                         ft.ElevatedButton("Download", on_click=start_dl)
@@ -406,11 +373,10 @@ def main(page: ft.Page):
                 page.open(dlg_missing)
                 return
 
-            # 2. Start Processing
-            btn_action.text = "STOP"
-            btn_action.icon = ft.Icons.STOP_ROUNDED
-            btn_action.style.bgcolor = COLOR_ERROR
-            btn_action.disabled = False
+            # Start Process
+            btn_content.text = "STOP"
+            btn_content.icon = ft.Icons.STOP_ROUNDED
+            btn_content.style.bgcolor = COLOR_ERROR
             status_text.value = "Working..."
             status_ring.value = None
             page.update()
@@ -421,19 +387,43 @@ def main(page: ft.Page):
             proxy_processor.init_globals({**DEFAULT_SETTINGS, **settings})
             threading.Thread(target=process_thread, daemon=True).start()
         else:
-            # 3. Stop Processing
-            btn_action.disabled = True
-            btn_action.text = "STOPPING..."
+            # Stop Process
+            btn_content.disabled = True
+            btn_content.text = "STOPPING..."
             page.update()
             proxy_processor.stop_processing()
 
-    btn_action = ft.ElevatedButton(
-        "START", icon=ft.Icons.PLAY_ARROW_ROUNDED, on_click=on_action_click,
-        style=ft.ButtonStyle(bgcolor=COLOR_PRIMARY, color="white", shape=ft.RoundedRectangleBorder(radius=12)),
-        height=55, width=220
+    # --- Animated Button ---
+    # --- Animated Button (Fixed) ---
+    def animate_button_click():
+        # Just use simple float values for scaling
+        btn_container.scale = 0.95
+        btn_container.update()
+        time.sleep(0.1)
+        btn_container.scale = 1.0
+        btn_container.update()
+
+    btn_content = ft.ElevatedButton(
+        "START", 
+        icon=ft.Icons.PLAY_ARROW_ROUNDED, 
+        on_click=lambda e: [animate_button_click(), on_action_click(e)],
+        style=ft.ButtonStyle(
+            bgcolor=COLOR_PRIMARY, 
+            color="white", 
+            shape=ft.RoundedRectangleBorder(radius=12)
+        ),
+        height=55, 
+        width=220
     )
 
-    # --- Channel Logic (Updated with Select All) ---
+    btn_container = ft.Container(
+        content=btn_content,
+        # FIX: Use simple number '1' or 'ft.Scale(1)' instead of 'ft.transform.Scale'
+        scale=1, 
+        animate_scale=ft.Animation(300, ft.AnimationCurve.BOUNCE_OUT),
+    )
+
+    # --- Channel Logic ---
     def refresh_chan(search=""):
         data = load_json(USER_ASSETS_FILE)
         chan_lv.controls.clear()
@@ -463,10 +453,8 @@ def main(page: ft.Page):
 
     def toggle_all_channels(state: bool):
         d = load_json(USER_ASSETS_FILE)
-        for k in d:
-            d[k]['enabled'] = state
-        save_json(USER_ASSETS_FILE, d)
-        refresh_chan(tf_search.value)
+        for k in d: d[k]['enabled'] = state
+        save_json(USER_ASSETS_FILE, d); refresh_chan(tf_search.value)
 
     def del_c(name):
         d = load_json(USER_ASSETS_FILE); del d[name]
@@ -477,7 +465,6 @@ def main(page: ft.Page):
         d = load_json(USER_ASSETS_FILE); d[tf_add.value] = {"slug": tf_add.value, "enabled": True}
         save_json(USER_ASSETS_FILE, d); tf_add.value = ""; refresh_chan(tf_search.value)
 
-    # Bind search listener
     tf_search.on_change = lambda e: refresh_chan(e.control.value)
 
     # --- File Logic ---
@@ -503,14 +490,20 @@ def main(page: ft.Page):
                 )
         page.update()
 
-    # --- Settings Logic ---
+    # --- Settings Logic (Client Storage) ---
     def load_settings_ui():
-        d = load_json(SETTINGS_FILE)
-        d = {**DEFAULT_SETTINGS, **d}
-        tf_brand.value = d['branding_name']
-        tf_max.value = str(d['max_per_channel'])
-        tf_fake.value = d['fake_configs']
-        sw_conv.value = d['enable_converters']
+        if page.client_storage.contains_key("branding_name"):
+            tf_brand.value = page.client_storage.get("branding_name")
+            tf_max.value = str(page.client_storage.get("max_per_channel"))
+            tf_fake.value = page.client_storage.get("fake_configs")
+            sw_conv.value = page.client_storage.get("enable_converters")
+        else:
+            d = load_json(SETTINGS_FILE)
+            d = {**DEFAULT_SETTINGS, **d}
+            tf_brand.value = d['branding_name']
+            tf_max.value = str(d['max_per_channel'])
+            tf_fake.value = d['fake_configs']
+            sw_conv.value = d['enable_converters']
         page.update()
 
     def save_settings_ui(e):
@@ -521,14 +514,20 @@ def main(page: ft.Page):
             "enable_converters": sw_conv.value,
             "timeout": 10
         }
+        # Save to File (for script)
         save_json(SETTINGS_FILE, d)
+        # Save to Storage (for UI persistence)
+        page.client_storage.set("branding_name", d["branding_name"])
+        page.client_storage.set("max_per_channel", d["max_per_channel"])
+        page.client_storage.set("fake_configs", d["fake_configs"])
+        page.client_storage.set("enable_converters", d["enable_converters"])
+        
         page.open(ft.SnackBar(ft.Text("Settings Saved!"), bgcolor=COLOR_PRIMARY))
 
     # ==========================
-    # 📱 VIEWS (STATIC)
+    # 📱 VIEWS
     # ==========================
     
-    # 1. DASHBOARD
     def stat_item(icon, val, label, col):
         return ft.Container(
             content=ft.Column([ft.Icon(icon, color=col), val, ft.Text(label, size=11, color=COLOR_TEXT_DIM)], horizontal_alignment="center"),
@@ -551,7 +550,7 @@ def main(page: ft.Page):
             ft.Container(expand=True),
             ft.Row([
                 ft.IconButton(ft.Icons.TERMINAL_ROUNDED, icon_color=COLOR_TEXT_DIM, on_click=lambda e: page.open(bs_logs), tooltip="Logs"),
-                btn_action,
+                btn_container,
                 ft.IconButton(ft.Icons.REFRESH_ROUNDED, icon_color=COLOR_TEXT_DIM, on_click=lambda e: update_stats(), tooltip="Refresh"),
             ], alignment=ft.MainAxisAlignment.SPACE_EVENLY),
             ft.Container(height=10),
@@ -559,13 +558,11 @@ def main(page: ft.Page):
         padding=25, expand=True
     )
 
-    # 2. CHANNELS (Updated with Select All Row)
     view_channels = ft.Container(
         content=ft.Column([
             ft.Text("Channels", size=24, weight="bold"),
             ft.Row([tf_add, ft.IconButton(ft.Icons.ADD_CIRCLE_ROUNDED, icon_color=COLOR_PRIMARY, icon_size=40, on_click=add_c)]),
             tf_search,
-            # NEW: Actions Row
             ft.Row([
                 txt_chan_count,
                 ft.Container(expand=True),
@@ -576,7 +573,6 @@ def main(page: ft.Page):
         ]), padding=20, expand=True
     )
 
-    # 3. FILES
     view_files = ft.Container(
         content=ft.Column([
             ft.Row([ft.Text("Output Files", size=24, weight="bold"), ft.Container(expand=True), ft.IconButton(ft.Icons.REFRESH_ROUNDED, on_click=lambda e: refresh_files())]),
@@ -584,7 +580,6 @@ def main(page: ft.Page):
         ]), padding=20, expand=True
     )
 
-    # 4. SETTINGS
     view_settings = ft.Container(
         content=ft.Column([
             ft.Text("Settings", size=24, weight="bold"),
@@ -596,10 +591,7 @@ def main(page: ft.Page):
         ]), padding=20, expand=True
     )
 
-    # ==========================
-    # 🧭 NAVIGATION
-    # ==========================
-    
+    # --- Nav ---
     content_area = ft.Container(expand=True)
     content_area.content = view_dashboard 
 
@@ -607,16 +599,16 @@ def main(page: ft.Page):
         idx = e.control.selected_index
         if idx == 0: 
             update_stats()
-            content_area.content = view_dashboard # REMOVED ()
+            content_area.content = view_dashboard
         elif idx == 1: 
             refresh_chan()
-            content_area.content = view_channels  # REMOVED ()
+            content_area.content = view_channels
         elif idx == 2: 
             refresh_files()
-            content_area.content = view_files     # REMOVED ()
+            content_area.content = view_files
         elif idx == 3: 
             load_settings_ui()
-            content_area.content = view_settings  # REMOVED ()
+            content_area.content = view_settings
         page.update()
 
     nav_bar = ft.NavigationBar(
@@ -634,7 +626,11 @@ def main(page: ft.Page):
         label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW
     )
 
-    # Main Layout
+    layout = ft.SafeArea(
+        content=ft.Column([content_area, nav_bar], spacing=0, expand=True),
+        expand=True, bottom=True, maintain_bottom_view_padding=True
+    )
+
     main_bg = ft.Container(
         expand=True,
         gradient=ft.LinearGradient(
@@ -642,30 +638,10 @@ def main(page: ft.Page):
             end=ft.alignment.bottom_center,
             colors=[COLOR_BG_TOP, COLOR_BG_BOT]
         ),
-        content=ft.Column([
-            ft.SafeArea(content_area, expand=True), 
-            nav_bar
-        ], spacing=0, expand=True)
+        content=layout
     )
 
-    # Assemble Layout
-    # SAFE AREA now wraps the ENTIRE Column (Content + Nav) 
-    # to push the navbar above the system bottom bar.
-    layout = ft.SafeArea(
-        content=ft.Column([
-            content_area, 
-            nav_bar
-        ], spacing=0, expand=True),
-        expand=True,
-        bottom=True, # Explicitly protect bottom insets
-        maintain_bottom_view_padding=True
-    )
-
-    main_bg.content = layout
     page.add(main_bg)
-    
-    # Initialize content
-    content_area.content = view_dashboard 
     update_stats()
 
 if __name__ == "__main__":
