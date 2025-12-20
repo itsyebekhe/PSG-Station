@@ -9,6 +9,7 @@ import stat
 import requests
 import platform
 import proxy_processor
+import pathlib
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -17,34 +18,35 @@ import proxy_processor
 INTERNAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_work_dir():
-    # 1. Check for Android environment variables
-    # 'HOME' is set by Termux and most Flet/Kivy loaders to the private internal files dir
-    # 'PYTHONPATH' or 'ANDROID_ARGUMENT' are common in APK environments
-    is_android = "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel')
+    # 1. Android Logic
+    if "ANDROID_ARGUMENT" in os.environ or hasattr(sys, 'getandroidapilevel'):
+        try:
+            # Try to get the HOME variable (usually /data/user/0/com.package/files)
+            base = os.environ.get("HOME")
+            
+            # If HOME isn't set, use the directory of the current script
+            if not base:
+                base = os.path.dirname(os.path.abspath(__file__))
 
-    if is_android:
-        # Try HOME first (standard for internal storage)
-        path = os.environ.get("HOME")
-        
-        # Fallback: Detect package name from the script path itself
-        # This turns /data/user/0/com.example.app/files/app/main.py -> /data/user/0/com.example.app/files
-        if not path or "/data/" not in path:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if "/data/" in script_dir:
-                # Split path and find the "files" or package directory
-                parts = script_dir.split('/')
-                if "files" in parts:
-                    idx = parts.index("files")
-                    path = "/".join(parts[:idx+1])
-                else:
-                    path = script_dir # Last resort fallback
-        
-        # Ensure the directory exists
-        if path:
-            os.makedirs(path, exist_ok=True)
-            return path
+            # THE FIX: Resolve Symlinks
+            # This converts '/data/user/0/...' -> '/data_mirror/data_ce/null/0/...'
+            # This gives us the REAL physical path on the disk.
+            real_path = str(pathlib.Path(base).resolve())
+            
+            # Create a dedicated folder for our binaries to keep things clean
+            bin_path = os.path.join(real_path, "psg_bin")
+            
+            if not os.path.exists(bin_path):
+                os.makedirs(bin_path, 0o777, exist_ok=True)
+                
+            return bin_path
 
-    # 2. PC Frozen (Exe)
+        except Exception as e:
+            # Fallback if something goes wrong with resolve (permissions, etc)
+            print(f"Path Resolution Error: {e}")
+            return os.path.dirname(os.path.abspath(__file__))
+
+    # 2. PC Frozen
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     
